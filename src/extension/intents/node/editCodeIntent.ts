@@ -17,6 +17,7 @@ import { IEditLogService } from '../../../platform/multiFileEdit/common/editLogS
 import { IChatEndpoint } from '../../../platform/networking/common/networking';
 import { INotebookService } from '../../../platform/notebook/common/notebookService';
 import { IPromptPathRepresentationService } from '../../../platform/prompts/common/promptPathRepresentationService';
+import { ISoundNotificationService } from '../../../platform/soundNotification/common/soundNotificationService';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { IWorkspaceService } from '../../../platform/workspace/common/workspaceService';
@@ -334,6 +335,7 @@ export class EditCodeIntentInvocation implements IIntentInvocation {
 		@ICommandService protected readonly commandService: ICommandService,
 		@ITelemetryService protected readonly telemetryService: ITelemetryService,
 		@INotebookService private readonly notebookService: INotebookService,
+		@ISoundNotificationService private readonly soundNotificationService: ISoundNotificationService,
 	) { }
 
 	getAvailableTools(): vscode.LanguageModelToolInformation[] | Promise<vscode.LanguageModelToolInformation[]> | undefined {
@@ -562,6 +564,8 @@ export class EditCodeIntentInvocation implements IIntentInvocation {
 
 					const confirmEdits = await this.shouldConfirmBeforeFileEdits(codeBlock.resource);
 					if (confirmEdits) {
+						// Play sound notification when asking for file edit approval
+						this.soundNotificationService.notifyForApproval('Copilot wants to edit a file and needs your approval.');
 						outputStream.confirmation(confirmEdits.title, confirmEdits.message, makeEditsConfirmation(context.turn.id, request));
 						continue;
 					}

@@ -11,6 +11,7 @@ import { ChatLocation } from '../../../../platform/chat/common/commonTypes';
 import { IRunCommandExecutionService } from '../../../../platform/commands/common/runCommandExecutionService';
 import { TextDocumentSnapshot } from '../../../../platform/editing/common/textDocumentSnapshot';
 import { IChatEndpoint } from '../../../../platform/networking/common/networking';
+import { ISoundNotificationService } from '../../../../platform/soundNotification/common/soundNotificationService';
 import { testExtensionsForLanguage } from '../../../../platform/testing/common/setupTestExtensions';
 import { CancellationToken } from '../../../../util/vs/base/common/cancellation';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
@@ -35,6 +36,7 @@ export class SetupTestsFrameworkQueryInvocationRaw {
 		private readonly documentContext: IDocumentContext | undefined,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IRunCommandExecutionService private readonly commandService: IRunCommandExecutionService,
+		@ISoundNotificationService private readonly soundNotificationService: ISoundNotificationService,
 	) {
 	}
 	public async buildPrompt(
@@ -85,6 +87,8 @@ export class SetupTestsFrameworkQueryInvocationRaw {
 			.filter(l => !!l);
 
 		if (frameworks.length) {
+			// Play sound notification when asking for test framework selection
+			this.soundNotificationService.notifyForApproval('Copilot found multiple testing frameworks and needs you to pick one.');
 			outputStream.confirmation(
 				l10n.t('Pick a testing framework'),
 				l10n.t('Pick from these options, or use chat to tell me what you\'d prefer:'),
@@ -113,8 +117,9 @@ export class SetupTestsFrameworkQueryInvocation extends SetupTestsFrameworkQuery
 		documentContext: IDocumentContext | undefined,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IRunCommandExecutionService commandService: IRunCommandExecutionService,
+		@ISoundNotificationService soundNotificationService: ISoundNotificationService,
 	) {
-		super(endpoint, documentContext, instantiationService, commandService);
+		super(endpoint, documentContext, instantiationService, commandService, soundNotificationService);
 	}
 }
 
