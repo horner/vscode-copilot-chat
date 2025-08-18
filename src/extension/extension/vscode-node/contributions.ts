@@ -35,6 +35,7 @@ import { PromptFileContextContribution } from '../../promptFileContext/vscode-no
 import { RelatedFilesProviderContribution } from '../../relatedFiles/vscode-node/relatedFiles.contribution';
 import { SearchPanelCommands } from '../../search/vscode-node/commands';
 import { SettingsSchemaFeature } from '../../settingsSchema/vscode-node/settingsSchemaFeature';
+import { SoundNotificationContribution } from '../../soundNotification/vscode-node/soundNotification.contribution';
 import { SurveyCommandContribution } from '../../survey/vscode-node/surveyCommands';
 import { SetupTestsContribution } from '../../testing/vscode/setupTestContributions';
 import { ToolsContribution } from '../../tools/vscode-node/tools';
@@ -55,6 +56,7 @@ import vscodeContributions from '../vscode/contributions';
 export const vscodeNodeContributions: IExtensionContributionFactory[] = [
 	...vscodeContributions,
 	asContributionFactory(ConversationFeature),
+	asContributionFactory(SoundNotificationContribution),
 	workspaceChunkSearchContribution,
 	asContributionFactory(AuthenticationContrib),
 	chatBlockLanguageContribution,

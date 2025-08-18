@@ -760,6 +760,11 @@ export namespace ConfigKey {
 	export const NotebookFollowCellExecution = defineSetting<boolean>('chat.notebook.followCellExecution.enabled', false);
 	export const CustomInstructionsInSystemMessage = defineSetting<boolean>('chat.customInstructionsInSystemMessage', true);
 
+	/** Sound notification settings */
+	export const SoundNotificationEnabled = defineSetting<boolean>('chat.soundNotification.enabled', true);
+	export const SoundNotificationType = defineSetting<'beep' | 'say'>('chat.soundNotification.type', 'beep');
+	export const SoundNotificationMessage = defineSetting<string>('chat.soundNotification.message', 'Copilot Chat needs your approval to continue.');
+
 	export const EnableRetryAfterFilteredResponse = defineExpSetting<boolean>('chat.enableRetryAfterFilteredResponse', true);
 	export const EnableAlternateGptPrompt = defineExpSetting<boolean>('chat.alternateGptPrompt.enabled', false);
 	export const Gpt5AlternatePrompt = defineExpSetting<string>('chat.gpt5AlternatePrompt', 'default');

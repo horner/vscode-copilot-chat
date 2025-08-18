@@ -16,6 +16,7 @@ import { IMakeChatRequestOptions } from '../../../platform/networking/common/net
 import { IRequestLogger } from '../../../platform/requestLogger/node/requestLogger';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { IThinkingDataService } from '../../../platform/thinking/node/thinkingDataService';
+import { ISoundNotificationService } from '../../../platform/soundNotification/common/soundNotificationService';
 import { tryFinalizeResponseStream } from '../../../util/common/chatResponseStreamImpl';
 import { CancellationError, isCancellationError } from '../../../util/vs/base/common/errors';
 import { Emitter } from '../../../util/vs/base/common/event';
@@ -115,6 +116,7 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		@IAuthenticationChatUpgradeService private readonly _authenticationChatUpgradeService: IAuthenticationChatUpgradeService,
 		@ITelemetryService protected readonly _telemetryService: ITelemetryService,
 		@IThinkingDataService private readonly _thinkingDataService: IThinkingDataService,
+		@ISoundNotificationService private readonly _soundNotificationService: ISoundNotificationService,
 	) {
 		super();
 	}
@@ -315,6 +317,9 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 				comment: 'Link to workbench settings for chat.maxRequests, which controls the maximum number of requests Copilot will make before stopping. This is used in the tool calling loop to determine when to stop iterating on a problem.'
 			}));
 			messageString.isTrusted = { enabledCommands: ['workbench.action.openSettings'] };
+
+			// Play sound notification when asking for approval
+			this._soundNotificationService.notifyForApproval('Copilot has reached the iteration limit and needs your approval to continue.');
 
 			stream.confirmation(
 				l10n.t('Continue to iterate?'),

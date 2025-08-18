@@ -2181,6 +2181,29 @@
 						"type": "boolean",
 						"default": true,
 						"description": "%github.copilot.config.customInstructionsInSystemMessage%"
+					},
+					"github.copilot.chat.soundNotification.enabled": {
+						"type": "boolean",
+						"default": true,
+						"description": "Enable sound notifications when Copilot Chat needs approval to continue"
+					},
+					"github.copilot.chat.soundNotification.type": {
+						"type": "string",
+						"enum": [
+							"beep",
+							"say"
+						],
+						"enumDescriptions": [
+							"Play a simple beep sound",
+							"Use text-to-speech (macOS only, falls back to beep on other platforms)"
+						],
+						"default": "beep",
+						"description": "Type of sound notification to play"
+					},
+					"github.copilot.chat.soundNotification.message": {
+						"type": "string",
+						"default": "Copilot Chat needs your approval to continue.",
+						"description": "Message to announce when using text-to-speech notifications"
 					}
 				}
 			},
