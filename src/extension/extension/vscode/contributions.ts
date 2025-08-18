@@ -6,6 +6,7 @@
 import { NesActivationTelemetryContribution } from '../../../platform/inlineEdits/common/nesActivationStatusTelemetry.contribution';
 import { asContributionFactory, IExtensionContributionFactory } from '../../common/contributions';
 import * as contextContribution from '../../context/vscode/context.contribution';
+import * as soundNotificationContribution from '../../soundNotification/vscode/soundNotification.contribution';
 import { LifecycleTelemetryContrib } from '../../telemetry/common/lifecycleTelemetryContrib';
 import { GithubTelemetryForwardingContrib } from '../../telemetry/vscode/githubTelemetryForwardingContrib';
 
@@ -22,6 +23,7 @@ const vscodeContributions: IExtensionContributionFactory[] = [
 	asContributionFactory(NesActivationTelemetryContribution),
 	asContributionFactory(GithubTelemetryForwardingContrib),
 	contextContribution,
+	soundNotificationContribution,
 ];
 
 export default vscodeContributions;
