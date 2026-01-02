@@ -9,13 +9,14 @@ import type { CancellationToken, ChatRequest, ChatResponseProgressPart, ChatResp
 import { IAuthenticationChatUpgradeService } from '../../../platform/authentication/common/authenticationUpgrade';
 import { FetchStreamSource, IResponsePart } from '../../../platform/chat/common/chatMLFetcher';
 import { CanceledResult, ChatFetchResponseType, ChatResponse } from '../../../platform/chat/common/commonTypes';
+import { isAnthropicFamily } from '../../../platform/endpoint/common/chatModelCapabilities';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
+import { rawPartAsThinkingData } from '../../../platform/endpoint/common/thinkingDataContainer';
 import { ILogService } from '../../../platform/log/common/logService';
 import { OpenAiFunctionDef } from '../../../platform/networking/common/fetch';
 import { IMakeChatRequestOptions } from '../../../platform/networking/common/networking';
 import { IRequestLogger } from '../../../platform/requestLogger/node/requestLogger';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
-import { IThinkingDataService } from '../../../platform/thinking/node/thinkingDataService';
 import { tryFinalizeResponseStream } from '../../../util/common/chatResponseStreamImpl';
 import { CancellationError, isCancellationError } from '../../../util/vs/base/common/errors';
 import { Emitter } from '../../../util/vs/base/common/event';
@@ -29,7 +30,8 @@ import { InteractionOutcomeComputer } from '../../inlineChat/node/promptCrafting
 import { ChatVariablesCollection } from '../../prompt/common/chatVariablesCollection';
 import { Conversation, IResultMetadata, ResponseStreamParticipant, TurnStatus } from '../../prompt/common/conversation';
 import { IBuildPromptContext, InternalToolReference, IToolCall, IToolCallRound } from '../../prompt/common/intents';
-import { ToolCallRound } from '../../prompt/common/toolCallRound';
+import { cancelText, IToolCallIterationIncrease } from '../../prompt/common/specialRequestTypes';
+import { ThinkingDataItem, ToolCallRound } from '../../prompt/common/toolCallRound';
 import { IBuildPromptResult, IResponseProcessor } from '../../prompt/node/intents';
 import { PseudoStopStartResponseProcessor } from '../../prompt/node/pseudoStartStopConversationCallback';
 import { ResponseProcessorContext } from '../../prompt/node/responseProcessorContext';
@@ -82,7 +84,7 @@ export interface IToolCallingBuiltPromptEvent {
 	tools: LanguageModelToolInformation[];
 }
 
-export type ToolCallingLoopFetchOptions = Required<Pick<IMakeChatRequestOptions, 'messages' | 'finishedCb' | 'requestOptions' | 'userInitiatedRequest'>>;
+export type ToolCallingLoopFetchOptions = Required<Pick<IMakeChatRequestOptions, 'messages' | 'finishedCb' | 'requestOptions' | 'userInitiatedRequest'>> & Pick<IMakeChatRequestOptions, 'disableThinking'>;
 
 /**
  * This is a base class that can be used to implement a tool calling loop
@@ -114,7 +116,6 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		@IRequestLogger private readonly _requestLogger: IRequestLogger,
 		@IAuthenticationChatUpgradeService private readonly _authenticationChatUpgradeService: IAuthenticationChatUpgradeService,
 		@ITelemetryService protected readonly _telemetryService: ITelemetryService,
-		@IThinkingDataService private readonly _thinkingDataService: IThinkingDataService,
 	) {
 		super();
 	}
@@ -130,7 +131,7 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		const { request } = this.options;
 		const chatVariables = new ChatVariablesCollection(request.references);
 
-		const isContinuation = isToolCallLimitAcceptance(this.options.request) || isContinueOnError(this.options.request);
+		const isContinuation = this.turn.isContinuation;
 		const query = isContinuation ?
 			'Please continue' :
 			this.turn.request.message;
@@ -154,7 +155,7 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 				availableTools
 			},
 			isContinuation,
-			modeInstructions: this.options.request.modeInstructions,
+			modeInstructions: this.options.request.modeInstructions2,
 		};
 	}
 
@@ -296,7 +297,8 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 				*/
 				this._telemetryService.sendMSFTTelemetryEvent('readFileTrajectory',
 					{
-						model: this.options.request.model.id,
+						// model will be undefined in the simulator
+						model: this.options.request.model?.id,
 					},
 					{
 						rounds: seqArgs.length,
@@ -432,9 +434,12 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		}) : undefined;
 		let statefulMarker: string | undefined;
 		const toolCalls: IToolCall[] = [];
+		let thinkingItem: ThinkingDataItem | undefined;
+		const endpoint = await this._endpointProvider.getChatEndpoint(this.options.request);
+		const disableThinking = isContinuation && isAnthropicFamily(endpoint) && !ToolCallingLoop.messagesContainThinking(buildPromptResult.messages);
 		const fetchResult = await this.fetch({
 			messages: this.applyMessagePostProcessing(buildPromptResult.messages),
-			finishedCb: async (text, _, delta) => {
+			finishedCb: async (text, index, delta) => {
 				fetchStreamSource?.update(text, delta);
 				if (delta.copilotToolCalls) {
 					toolCalls.push(...delta.copilotToolCalls.map((call): IToolCall => ({
@@ -445,6 +450,9 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 				}
 				if (delta.statefulMarker) {
 					statefulMarker = delta.statefulMarker;
+				}
+				if (delta.thinking) {
+					thinkingItem = ThinkingDataItem.createOrUpdate(thinkingItem, delta.thinking);
 				}
 
 				return stopEarly ? text.length : undefined;
@@ -459,7 +467,8 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 					type: 'function',
 				})),
 			},
-			userInitiatedRequest: iterationNumber === 0 && !isContinuation
+			userInitiatedRequest: iterationNumber === 0 && !isContinuation && !this.options.request.isSubagent,
+			disableThinking,
 		}, token);
 
 		fetchStreamSource?.resolve();
@@ -481,15 +490,16 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		this.turn.setMetadata(interactionOutcomeComputer.interactionOutcome);
 		const toolInputRetry = isToolInputFailure ? (this.toolCallRounds.at(-1)?.toolInputRetry || 0) + 1 : 0;
 		if (fetchResult.type === ChatFetchResponseType.Success) {
+			thinkingItem?.updateWithFetchResult(fetchResult);
 			return {
 				response: fetchResult,
-				round: new ToolCallRound(
-					fetchResult.value,
+				round: ToolCallRound.create({
+					response: fetchResult.value,
 					toolCalls,
 					toolInputRetry,
-					undefined,
-					statefulMarker
-				),
+					statefulMarker,
+					thinking: thinkingItem
+				}),
 				chatResult,
 				hadIgnoredFiles: buildPromptResult.hasIgnoredFiles,
 				lastRequestMessages: buildPromptResult.messages,
@@ -502,7 +512,7 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 			hadIgnoredFiles: buildPromptResult.hasIgnoredFiles,
 			lastRequestMessages: buildPromptResult.messages,
 			availableTools,
-			round: new ToolCallRound('', toolCalls, toolInputRetry, undefined)
+			round: new ToolCallRound('', toolCalls, toolInputRetry)
 		};
 	}
 
@@ -539,6 +549,32 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 
 			return m;
 		});
+	}
+
+	public static messagesContainThinking(messages: Raw.ChatMessage[]): boolean {
+		let lastUserMessageIndex = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (messages[i].role === Raw.ChatRole.User) {
+				lastUserMessageIndex = i;
+				break;
+			}
+		}
+
+		// If no user message found, return false to disable thinking
+		if (lastUserMessageIndex === -1) {
+			return false;
+		}
+
+		for (let i = lastUserMessageIndex + 1; i < messages.length; i++) {
+			const m = messages[i];
+			if (m.role !== Raw.ChatRole.Assistant) {
+				continue;
+			}
+			return Array.isArray(m.content) && m.content.some(part =>
+				part.type === Raw.ChatCompletionContentPartKind.Opaque && rawPartAsThinkingData(part) !== undefined
+			);
+		}
+		return false;
 	}
 
 	/**
@@ -647,8 +683,7 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		}
 
 		if (originalCall) {
-			const thinking = this._thinkingDataService.get(originalCall.id);
-			this._requestLogger.logToolCall(originalCall.id || generateUuid(), originalCall.name, originalCall.arguments, metadata.result, thinking);
+			this._requestLogger.logToolCall(originalCall.id || generateUuid(), originalCall.name, originalCall.arguments, metadata.result, lastTurn?.thinking);
 		}
 	}
 }
@@ -678,22 +713,3 @@ export interface IToolCallLoopResult extends IToolCallSingleResult {
 	toolCallRounds: IToolCallRound[];
 	toolCallResults: Record<string, LanguageModelToolResult2>;
 }
-
-interface IToolCallIterationIncrease {
-	copilotRequestedRoundLimit: number;
-}
-
-const isToolCallIterationIncrease = (c: any): c is IToolCallIterationIncrease => c && typeof c.copilotRequestedRoundLimit === 'number';
-
-export const getRequestedToolCallIterationLimit = (request: ChatRequest) => request.acceptedConfirmationData?.find(isToolCallIterationIncrease)?.copilotRequestedRoundLimit;
-// todo@connor4312 improve with the choices API
-export const isToolCallLimitCancellation = (request: ChatRequest) => !!getRequestedToolCallIterationLimit(request) && request.prompt.includes(cancelText());
-export const isToolCallLimitAcceptance = (request: ChatRequest) => !!getRequestedToolCallIterationLimit(request) && !isToolCallLimitCancellation(request);
-export interface IContinueOnErrorConfirmation {
-	copilotContinueOnError: true;
-}
-function isContinueOnErrorConfirmation(c: unknown): c is IContinueOnErrorConfirmation {
-	return !!(c && (c as IContinueOnErrorConfirmation).copilotContinueOnError === true);
-}
-export const isContinueOnError = (request: ChatRequest) => !!(request.acceptedConfirmationData?.some(isContinueOnErrorConfirmation));
-const cancelText = () => l10n.t('Pause');

@@ -5,8 +5,10 @@
 
 import { t } from '@vscode/l10n';
 import * as vscode from 'vscode';
+import { ResolvedRepoRemoteInfo } from '../../../platform/git/common/gitService';
+import { ILogService } from '../../../platform/log/common/logService';
 import { ICodeSearchAuthenticationService } from '../../../platform/remoteCodeSearch/node/codeSearchRepoAuth';
-import { RepoStatus, ResolvedRepoEntry } from '../../../platform/remoteCodeSearch/node/codeSearchRepoTracker';
+import { CodeSearchRepoStatus } from '../../../platform/workspaceChunkSearch/node/codeSearch/codeSearchRepo';
 import { LocalEmbeddingsIndexStatus } from '../../../platform/workspaceChunkSearch/node/embeddingsChunkSearch';
 import { IWorkspaceChunkSearchService, WorkspaceIndexState } from '../../../platform/workspaceChunkSearch/node/workspaceChunkSearchService';
 import { coalesce } from '../../../util/vs/base/common/arrays';
@@ -17,7 +19,6 @@ import { buildLocalIndexCommandId, buildRemoteIndexCommandId } from './commands'
 
 
 const reauthenticateCommandId = '_copilot.workspaceIndex.signInAgain';
-const signInFirstTimeCommandId = '_copilot.workspaceIndex.signInToAnything';
 
 interface WorkspaceIndexStateReporter {
 	readonly onDidChangeIndexState: Event<void>;
@@ -78,12 +79,13 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 	private readonly minOutdatedFileCountToShow = 20;
 
 	constructor(
+		@IWorkspaceChunkSearchService workspaceChunkSearch: IWorkspaceChunkSearchService,
 		@ICodeSearchAuthenticationService private readonly _codeSearchAuthService: ICodeSearchAuthenticationService,
-		@IWorkspaceChunkSearchService _workspaceChunkSearch: IWorkspaceChunkSearchService,
+		@ILogService private readonly _logService: ILogService,
 	) {
 		super();
 
-		this._statusReporter = _workspaceChunkSearch;
+		this._statusReporter = workspaceChunkSearch;
 
 		this._statusItem = this._register(vscode.window.createChatStatusItem('copilot.workspaceIndexStatus'));
 		this._statusItem.title = statusTitle;
@@ -110,44 +112,64 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 
 	private async _updateStatusItem(): Promise<void> {
 		const id = ++this.currentUpdateRequestId;
+		this._logService.trace(`ChatStatusWorkspaceIndexingStatus::updateStatusItem(id=${id}): starting`);
 
 		const state = await this._statusReporter.getIndexState();
 
 		// Make sure a new request hasn't come in since we started
 		if (id !== this.currentUpdateRequestId) {
+			this._logService.trace(`ChatStatusWorkspaceIndexingStatus::updateStatusItem(id=${id}): skipping`);
 			return;
 		}
 
-		const remoteIndexMessage = {
+		const remotelyIndexedMessage = Object.freeze({
 			title: t('Remotely indexed'),
 			learnMoreLink: 'https://aka.ms/vscode-copilot-workspace-remote-index',
-		};
+		});
 
 		// If we have remote index info, prioritize showing information related to it
 		switch (state.remoteIndexState.status) {
 			case 'initializing':
-				return this._writeInitializingStatus();
+				return this._writeStatusItem({
+					title: {
+						title: t('Remote index'),
+						learnMoreLink: 'https://aka.ms/vscode-copilot-workspace-remote-index',
+					},
+					details: {
+						message: t('Discovering repos'),
+						busy: true,
+					},
+				});
 
 			case 'loaded': {
 				if (state.remoteIndexState.repos.length > 0) {
-					if (state.remoteIndexState.repos.every(repo => repo.status === RepoStatus.NotIndexable)) {
+					if (state.remoteIndexState.repos.every(repo => repo.status === CodeSearchRepoStatus.NotIndexable)) {
 						break;
 					}
 
-					if (state.remoteIndexState.repos.every(repo => repo.status === RepoStatus.Ready)) {
+					if (state.remoteIndexState.repos.every(repo => repo.status === CodeSearchRepoStatus.Ready)) {
 						return this._writeStatusItem({
-							title: remoteIndexMessage,
+							title: remotelyIndexedMessage,
 							details: undefined
 						});
 					}
 
-					if (state.remoteIndexState.repos.some(repo => repo.status === RepoStatus.CheckingStatus || RepoStatus.Initializing)) {
-						return this._writeInitializingStatus();
+					if (state.remoteIndexState.repos.some(repo => repo.status === CodeSearchRepoStatus.CheckingStatus || repo.status === CodeSearchRepoStatus.Resolving)) {
+						return this._writeStatusItem({
+							title: {
+								title: t('Remote index'),
+								learnMoreLink: 'https://aka.ms/vscode-copilot-workspace-remote-index',
+							},
+							details: {
+								message: t('Checking status'),
+								busy: true,
+							},
+						});
 					}
 
-					if (state.remoteIndexState.repos.some(repo => repo.status === RepoStatus.BuildingIndex)) {
+					if (state.remoteIndexState.repos.some(repo => repo.status === CodeSearchRepoStatus.BuildingIndex)) {
 						return this._writeStatusItem({
-							title: remoteIndexMessage,
+							title: remotelyIndexedMessage,
 							details: {
 								message: t('Building'),
 								busy: true,
@@ -155,7 +177,7 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 						});
 					}
 
-					if (state.remoteIndexState.repos.some(repo => repo.status === RepoStatus.NotYetIndexed)) {
+					if (state.remoteIndexState.repos.some(repo => repo.status === CodeSearchRepoStatus.NotYetIndexed)) {
 						const local = await this.getLocalIndexStatusItem(state);
 						if (id !== this.currentUpdateRequestId) {
 							return;
@@ -163,7 +185,7 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 
 						return this._writeStatusItem({
 							title: local ? local.title : {
-								title: state.remoteIndexState.repos.every(repo => repo.status === RepoStatus.NotYetIndexed)
+								title: state.remoteIndexState.repos.every(repo => repo.status === CodeSearchRepoStatus.NotYetIndexed)
 									? t('Remote index not yet built')
 									: t('Remote index not yet built for a repo in the workspace'),
 								learnMoreLink: 'https://aka.ms/vscode-copilot-workspace-remote-index',
@@ -176,11 +198,11 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 					}
 
 					// We have a potential mix of statuses
-					const readyRepos = state.remoteIndexState.repos.filter(repo => repo.status === RepoStatus.Ready);
-					const errorRepos = state.remoteIndexState.repos.filter(repo => repo.status === RepoStatus.CouldNotCheckIndexStatus || repo.status === RepoStatus.NotAuthorized);
+					const readyRepos = state.remoteIndexState.repos.filter(repo => repo.status === CodeSearchRepoStatus.Ready);
+					const errorRepos = state.remoteIndexState.repos.filter(repo => repo.status === CodeSearchRepoStatus.CouldNotCheckIndexStatus || repo.status === CodeSearchRepoStatus.NotAuthorized);
 
 					if (errorRepos.length > 0) {
-						const inaccessibleRepo = errorRepos[0] as ResolvedRepoEntry;
+						const inaccessibleRepo = errorRepos[0].remoteInfo satisfies ResolvedRepoRemoteInfo | undefined;
 
 						return this._writeStatusItem({
 							title: {
@@ -210,19 +232,6 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 		}
 
 		this._writeStatusItem(localStatus);
-	}
-
-	private _writeInitializingStatus(): void | PromiseLike<void> {
-		return this._writeStatusItem({
-			title: {
-				title: t('Remote index'),
-				learnMoreLink: 'https://aka.ms/vscode-copilot-workspace-remote-index',
-			},
-			details: {
-				message: t('Checking status'),
-				busy: true,
-			},
-		});
 	}
 
 	private async getLocalIndexStatusItem(state: WorkspaceIndexState): Promise<ChatStatusItemState | undefined> {
@@ -263,6 +272,9 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 					},
 				};
 
+			case LocalEmbeddingsIndexStatus.Disabled:
+				return undefined;
+
 			case LocalEmbeddingsIndexStatus.TooManyFilesForAnyIndexing:
 			default:
 				return {
@@ -276,6 +288,8 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 	}
 
 	private _writeStatusItem(values: ChatStatusItemState | undefined) {
+		this._logService.trace(`ChatStatusWorkspaceIndexingStatus::_writeStatusItem()`);
+
 		if (!values) {
 			this._statusItem.hide();
 			return;
@@ -306,15 +320,7 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 	private registerCommands(): IDisposable {
 		const disposables = new DisposableStore();
 
-		disposables.add(vscode.commands.registerCommand(signInFirstTimeCommandId, async (repo: ResolvedRepoEntry | undefined) => {
-			if (!repo) {
-				return;
-			}
-
-			return this._codeSearchAuthService.tryAuthenticating(repo);
-		}));
-
-		disposables.add(vscode.commands.registerCommand(reauthenticateCommandId, async (repo: ResolvedRepoEntry | undefined) => {
+		disposables.add(vscode.commands.registerCommand(reauthenticateCommandId, async (repo: ResolvedRepoRemoteInfo | undefined) => {
 			if (!repo) {
 				return;
 			}

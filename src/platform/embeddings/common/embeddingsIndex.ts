@@ -32,12 +32,13 @@ export enum RemoteCacheType {
 	Api = 'api',
 	Extensions = 'extensions',
 	ProjectTemplates = 'project-templates',
+	Tools = 'tools'
 }
 
 // These values are the blob storage container names where we publish computed embeddings
 enum RemoteEmbeddingsContainer {
-	TEXT3SMALL = "text-3-small",
-	METIS_1024_I16_BINARY = "metis-1024-I16-Binary"
+	TEXT3SMALL = 'text-3-small',
+	METIS_1024_I16_BINARY = 'metis-1024-I16-Binary'
 }
 
 function embeddingsModelToRemoteContainer(embeddingType: EmbeddingType): RemoteEmbeddingsContainer {

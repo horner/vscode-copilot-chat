@@ -34,8 +34,16 @@ export class NullEnvService extends AbstractEnvService {
 		return 'test-machine';
 	}
 
+	override get devDeviceId(): string {
+		return 'test-dev-device';
+	}
+
 	override get remoteName(): string | undefined {
 		return undefined;
+	}
+
+	override get uiKind(): 'desktop' | 'web' {
+		return 'desktop';
 	}
 
 	override get uriScheme(): string {
@@ -64,5 +72,11 @@ export class NullEnvService extends AbstractEnvService {
 
 	override openExternal(target: URI): Promise<boolean> {
 		return Promise.resolve(false);
+	}
+}
+
+export class NullNativeEnvService extends NullEnvService {
+	get userHome(): URI {
+		return URI.file('/home/testuser');
 	}
 }

@@ -13,7 +13,7 @@ import { IDomainService } from '../../../endpoint/common/domainService';
 import { IEnvService } from '../../../env/common/envService';
 import { NullBaseOctoKitService } from '../../../github/common/nullOctokitServiceImpl';
 import { ILogService } from '../../../log/common/logService';
-import { FetchOptions, IAbortController, IFetcherService, Response } from '../../../networking/common/fetcherService';
+import { FetchOptions, IAbortController, IFetcherService, PaginationOptions, Response } from '../../../networking/common/fetcherService';
 import { ITelemetryService } from '../../../telemetry/common/telemetry';
 import { createFakeResponse } from '../../../test/node/fetcher';
 import { createPlatformServices, ITestingServicesAccessor } from '../../../test/node/services';
@@ -32,7 +32,7 @@ class RefreshFakeCopilotTokenManager extends BaseCopilotTokenManager {
 		@IFetcherService fetcherService: IFetcherService,
 		@IEnvService envService: IEnvService,
 	) {
-		super(new NullBaseOctoKitService(capiClientService, fetcherService), logService, telemetryService, domainService, capiClientService, fetcherService, envService);
+		super(new NullBaseOctoKitService(capiClientService, fetcherService, logService, telemetryService), logService, telemetryService, domainService, capiClientService, fetcherService, envService);
 	}
 
 	async getCopilotToken(force?: boolean): Promise<CopilotToken> {
@@ -73,7 +73,7 @@ describe('Copilot token unit tests', function () {
 		accessor = disposables.add(testingServiceCollection.createTestingAccessor());
 
 		const tokenManager = disposables.add(accessor.get(IInstantiationService).createInstance(RefreshFakeCopilotTokenManager, 1));
-		await tokenManager.authFromGitHubToken('fake-token');
+		await tokenManager.authFromGitHubToken('fake-token', 'fake-user');
 
 		expect(fetcher.requests.size).toBe(2);
 	});
@@ -103,7 +103,7 @@ describe('Copilot token unit tests', function () {
 		testingServiceCollection.define(IFetcherService, fetcher);
 		accessor = disposables.add(testingServiceCollection.createTestingAccessor());
 
-		const tokenManager = accessor.get(IInstantiationService).createInstance(CopilotTokenManagerFromGitHubToken, 'invalid');
+		const tokenManager = accessor.get(IInstantiationService).createInstance(CopilotTokenManagerFromGitHubToken, 'invalid', 'invalid-user');
 		const result = await tokenManager.checkCopilotToken();
 		expect(result).toEqual({
 			kind: 'failure',
@@ -114,6 +114,36 @@ describe('Copilot token unit tests', function () {
 		});
 	});
 
+	it('network request failed', async function () {
+		const fetcher = new StaticFetcherService('NETWORK_FAILURE'); // special sentinel simulates network failure
+
+		const testingServiceCollection = createPlatformServices();
+		testingServiceCollection.define(IFetcherService, fetcher);
+		accessor = disposables.add(testingServiceCollection.createTestingAccessor());
+
+		const tokenManager = accessor.get(IInstantiationService).createInstance(CopilotTokenManagerFromGitHubToken, 'valid', 'valid-user');
+		const result = await tokenManager.checkCopilotToken();
+		expect(result).toEqual({
+			kind: 'failure',
+			reason: 'RequestFailed',
+		});
+	});
+
+	it('JSON parse failed', async function () {
+		const fetcher = new StaticFetcherService(null); // null tokenInfo simulates parse failure (JSON.parse returns null)
+
+		const testingServiceCollection = createPlatformServices();
+		testingServiceCollection.define(IFetcherService, fetcher);
+		accessor = disposables.add(testingServiceCollection.createTestingAccessor());
+
+		const tokenManager = accessor.get(IInstantiationService).createInstance(CopilotTokenManagerFromGitHubToken, 'valid', 'valid-user');
+		const result = await tokenManager.checkCopilotToken();
+		expect(result).toEqual({
+			kind: 'failure',
+			reason: 'ParseFailed',
+		});
+	});
+
 	it('properly propagates errors', async function () {
 		const expectedError = new Error('to be handled');
 
@@ -121,7 +151,7 @@ describe('Copilot token unit tests', function () {
 		testingServiceCollection.define(IFetcherService, new ErrorFetcherService(expectedError));
 		accessor = disposables.add(testingServiceCollection.createTestingAccessor());
 
-		const tokenManager = accessor.get(IInstantiationService).createInstance(CopilotTokenManagerFromGitHubToken, 'invalid');
+		const tokenManager = accessor.get(IInstantiationService).createInstance(CopilotTokenManagerFromGitHubToken, 'invalid', 'invalid-user');
 		try {
 			await tokenManager.checkCopilotToken();
 		} catch (err: any) {
@@ -172,7 +202,7 @@ describe('Copilot token unit tests', function () {
 		accessor = disposables.add(testingServiceCollection.createTestingAccessor());
 
 		const tokenManager = disposables.add(accessor.get(IInstantiationService).createInstance(RefreshFakeCopilotTokenManager, 1));
-		await tokenManager.authFromGitHubToken('fake-token');
+		await tokenManager.authFromGitHubToken('fake-token', 'invalid-user');
 
 		expect(fetcher.requests.size).toBe(2);
 	});
@@ -186,12 +216,21 @@ class StaticFetcherService implements IFetcherService {
 	constructor(readonly tokenResponse: any) {
 	}
 
+	fetchWithPagination<T>(baseUrl: string, options: PaginationOptions<T>): Promise<T[]> {
+		throw new Error('Method not implemented.');
+	}
+
 	getUserAgentLibrary(): string {
 		return 'test';
 	}
 	fetch(url: string, options: FetchOptions): Promise<Response> {
 		this.requests.set(url, options);
 		if (url.endsWith('copilot_internal/v2/token')) {
+			if (this.tokenResponse === 'NETWORK_FAILURE') {
+				// Simulate network failure - return null response
+				return Promise.resolve(null as any);
+			}
+			// null will parse successfully as JSON (returns null) but fails tokenInfo check
 			return Promise.resolve(createFakeResponse(200, this.tokenResponse));
 		} else if (url.endsWith('copilot_internal/notification')) {
 			return Promise.resolve(createFakeResponse(200, ''));

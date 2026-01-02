@@ -8,12 +8,14 @@ import * as vscode from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
 import { Copilot } from '../../../platform/inlineCompletions/common/api';
+import { ILanguageContextProviderService, ProviderTarget } from '../../../platform/languageContextProvider/common/languageContextProviderService';
 import { ILogService } from '../../../platform/log/common/logService';
+import { PromptFileLangageId, PromptHeaderAttributes } from '../../../platform/promptFiles/common/promptsService';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { Disposable, DisposableStore, IDisposable } from '../../../util/vs/base/common/lifecycle';
 import { autorun, IObservable } from '../../../util/vs/base/common/observableInternal';
 
-const promptFileSelector = ['prompt', 'instructions', 'chatmode'];
+export const promptFileSelector = [PromptFileLangageId.prompt, PromptFileLangageId.instructions, PromptFileLangageId.agent];
 
 export class PromptFileContextContribution extends Disposable {
 
@@ -27,9 +29,10 @@ export class PromptFileContextContribution extends Disposable {
 		@ILogService private readonly logService: ILogService,
 		@IExperimentationService experimentationService: IExperimentationService,
 		@IEndpointProvider private readonly endpointProvider: IEndpointProvider,
+		@ILanguageContextProviderService private readonly languageContextProviderService: ILanguageContextProviderService,
 	) {
 		super();
-		this._enableCompletionContext = configurationService.getExperimentBasedConfigObservable(ConfigKey.Internal.PromptFileContext, experimentationService);
+		this._enableCompletionContext = configurationService.getExperimentBasedConfigObservable(ConfigKey.Advanced.PromptFileContext, experimentationService);
 		this._register(autorun(reader => {
 			if (this._enableCompletionContext.read(reader)) {
 				this.registration = this.register();
@@ -52,11 +55,6 @@ export class PromptFileContextContribution extends Disposable {
 	private async register(): Promise<IDisposable> {
 		const disposables = new DisposableStore();
 		try {
-			const copilotAPI = await this.getCopilotApi();
-			if (copilotAPI === undefined) {
-				this.logService.warn('Copilot API is undefined, unable to register context provider.');
-				return disposables;
-			}
 			const self = this;
 			const resolver: Copilot.ContextResolver<Copilot.SupportedContextItem> = {
 				async resolve(request: Copilot.ResolveRequest, token: vscode.CancellationToken): Promise<Copilot.SupportedContextItem[]> {
@@ -82,11 +80,16 @@ export class PromptFileContextContribution extends Disposable {
 				this.models = [...modelNames.keys()];
 			});
 
-			disposables.add(copilotAPI.registerContextProvider({
+			const provider: Copilot.ContextProvider<Copilot.SupportedContextItem> = {
 				id: 'promptfile-ai-context-provider',
 				selector: promptFileSelector,
 				resolver: resolver
-			}));
+			};
+			const copilotAPI = await this.getCopilotApi();
+			if (copilotAPI) {
+				disposables.add(copilotAPI.registerContextProvider(provider));
+			}
+			disposables.add(this.languageContextProviderService.registerContextProvider(provider, [ProviderTarget.NES, ProviderTarget.Completions]));
 		} catch (error) {
 			this.logService.error('Error regsistering prompt file context provider:', error);
 		}
@@ -95,15 +98,17 @@ export class PromptFileContextContribution extends Disposable {
 
 	private getContext(languageId: string): Copilot.SupportedContextItem[] {
 
+
 		switch (languageId) {
-			case 'prompt':
+			case PromptFileLangageId.prompt: {
+				const toolNamesList = this.getToolNames().join(', ');
 				return [
 					{
-						name: 'This is a prompt file that uses a frontmatter header with the following fields',
-						value: `mode, description, model, tools`,
+						name: 'This is a prompt file. It uses markdown with a YAML front matter header that only supports a limited set of attributes and values. Do not suggest any other properties',
+						value: [PromptHeaderAttributes.name, PromptHeaderAttributes.description, PromptHeaderAttributes.argumentHint, PromptHeaderAttributes.agent, PromptHeaderAttributes.model, PromptHeaderAttributes.tools].join(', '),
 					},
 					{
-						name: '`mode` is optional and must be one of the following values',
+						name: '`agent` is optional and must be one of the following values',
 						value: `ask, edit or agent`,
 					},
 					{
@@ -112,47 +117,56 @@ export class PromptFileContextContribution extends Disposable {
 					},
 					{
 						name: '`tools` is optional and is an array that can consist of any number of the following values',
-						value: `'changes', 'codebase', 'editFiles', 'extensions', 'fetch', 'findTestFiles', 'githubRepo', 'new', 'openSimpleBrowser', 'problems', 'runCommands', 'runNotebooks', 'runTasks', 'runTests', 'search', 'searchResults', 'terminalLastCommand', 'terminalSelection', 'testFailure', 'usages', 'vscodeAPI'`
+						value: toolNamesList
 					},
 					{
-						name: 'Here is an example of a prompt file:',
+						name: 'Here is an example of a prompt file',
 						value: [
+							``,
+							'```md',
 							`---`,
-							`mode: 'agent'`,
+							`agent: agent`,
 							`description: This prompt is used to generate a new issue template for GitHub repositories.`,
 							`model: ${this.models[0] || 'GPT-4.1'}`,
-							`tools: ['changes', 'codebase', 'editFiles', 'extensions', 'fetch', 'findTestFiles', 'githubRepo', 'new', 'openSimpleBrowser', 'problems', 'runCommands', 'runNotebooks', 'runTasks', 'runTests', 'search', 'searchResults', 'terminalLastCommand', 'terminalSelection', 'testFailure', 'usages', 'vscodeAPI']`,
+							`tools: [${toolNamesList}]`,
 							`---`,
 							`Generate a new issue template for a GitHub repository.`,
+							'```',
 						].join('\n'),
 					},
 				];
-			case 'instructions':
+			}
+			case PromptFileLangageId.instructions: {
 				return [
 					{
-						name: 'This is an instructions file that uses a frontmatter header with the following fields',
-						value: `description, applyTo`,
+						name: 'This is a instructions file. It uses markdown with a YAML front matter header that only supports a limited set of attributes and values. Do not suggest any other properties',
+						value: [PromptHeaderAttributes.name, PromptHeaderAttributes.description, PromptHeaderAttributes.applyTo].join(', ')
 					},
 					{
 						name: '`applyTo` is one or more glob patterns that specify which files the instructions apply to',
 						value: `**`,
 					},
 					{
-						name: 'Here is an example of a instruction file:',
+						name: 'Here is an example of an instruction file',
 						value: [
+							``,
+							'```md',
 							`---`,
 							`description: This file describes the TypeScript code style for the project.`,
 							`applyTo: **/*.ts, **/*.js`,
 							`---`,
 							`For private fields, start the field name with an underscore (_).`,
+							'```',
 						].join('\n'),
 					},
 				];
-			case 'chatmode':
+			}
+			case PromptFileLangageId.agent: {
+				const toolNamesList = this.getToolNames().join(', ');
 				return [
 					{
-						name: 'This is an custom mode file that uses a frontmatter header with the following fields',
-						value: `description, model, tools`,
+						name: 'This is a custom agent file. It uses markdown with a YAML front matter header that only supports a limited set of attributes and values. Do not suggest any other properties',
+						value: [PromptHeaderAttributes.name, PromptHeaderAttributes.description, PromptHeaderAttributes.argumentHint, PromptHeaderAttributes.target, PromptHeaderAttributes.model, PromptHeaderAttributes.tools, PromptHeaderAttributes.handOffs].join(', '),
 					},
 					{
 						name: '`model` is optional and must be one of the following values',
@@ -160,23 +174,50 @@ export class PromptFileContextContribution extends Disposable {
 					},
 					{
 						name: '`tools` is optional and is an array that can consist of any number of the following values',
-						value: `'changes', 'codebase', 'editFiles', 'extensions', 'fetch', 'findTestFiles', 'githubRepo', 'new', 'openSimpleBrowser', 'problems', 'runCommands', 'runNotebooks', 'runTasks', 'runTests', 'search', 'searchResults', 'terminalLastCommand', 'terminalSelection', 'testFailure', 'usages', 'vscodeAPI'`
+						value: `[${toolNamesList}]`,
 					},
 					{
-						name: 'Here is an example of a mode file:',
+						name: '`target` is optional and must be one of the following values',
+						value: `vscode, github-copilot`,
+					},
+					{
+						name: '`handoffs` is optional and is a sequence of mappings with `label`, `agent`, `prompt` and `send` properties',
 						value: [
+							`handoffs:`,
+							`  - label: Start Implementation`,
+							`    agent: agent`,
+							`    prompt: Implement the plan`,
+							`    send: true`,
+						].join('\n'),
+					},
+					{
+						name: 'Here is an example of a custom agent file',
+						value: [
+							``,
+							'```md',
 							`---`,
-							`description: This mode is used to plan a new feature.`,
+							`description: This custom agent researches and plans new features for VS Code extensions.`,
 							`model: GPT-4.1`,
-							`tools: ['changes', 'codebase','extensions', 'fetch', 'findTestFiles', 'githubRepo', 'openSimpleBrowser', 'problems', 'search', 'searchResults', 'terminalLastCommand', 'terminalSelection', 'testFailure', 'usages', 'vscodeAPI']`,
+							`tools: [${toolNamesList}]`,
+							`handoffs:`,
+							`  - label: Start Implementation`,
+							`    agent: agent`,
+							`    prompt: Implement the plan`,
+							`    send: true`,
 							`---`,
 							`First come up with a plan for the new feature. Write a todo list of tasks to complete the feature.`,
+							'```',
 						].join('\n'),
 					},
 				];
+			}
 			default:
 				return [];
 		}
+	}
+
+	private getToolNames(): string[] {
+		return ['execute', 'read', 'edit', 'search', 'web', 'agent', 'todo'];
 	}
 
 

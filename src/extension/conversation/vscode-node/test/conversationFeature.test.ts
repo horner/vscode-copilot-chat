@@ -9,15 +9,17 @@ import * as sinon from 'sinon';
 import * as vscode from 'vscode';
 import { IAuthenticationService } from '../../../../platform/authentication/common/authentication';
 import { CopilotToken } from '../../../../platform/authentication/common/copilotToken';
+import { setCopilotToken, StaticGitHubAuthenticationService } from '../../../../platform/authentication/common/staticGitHubAuthenticationService';
 import { FailingDevContainerConfigurationService, IDevContainerConfigurationService } from '../../../../platform/devcontainer/common/devContainerConfigurationService';
 import { ICombinedEmbeddingIndex, VSCodeCombinedIndexImpl } from '../../../../platform/embeddings/common/vscodeIndex';
 import { IVSCodeExtensionContext } from '../../../../platform/extContext/common/extensionContext';
 import { IGitCommitMessageService, NoopGitCommitMessageService } from '../../../../platform/git/common/gitCommitMessageService';
 import { ISettingsEditorSearchService, NoopSettingsEditorSearchService } from '../../../../platform/settingsEditor/common/settingsEditorSearchService';
 import { ITestingServicesAccessor } from '../../../../platform/test/node/services';
-import { setCopilotToken } from '../../../../platform/authentication/common/staticGitHubAuthenticationService';
 import { SyncDescriptor } from '../../../../util/vs/platform/instantiation/common/descriptors';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
+import { IMergeConflictService } from '../../../git/common/mergeConflictService';
+import { TestMergeConflictServiceImpl } from '../../../git/vscode/mergeConflictServiceImpl';
 import { IIntentService, IntentService } from '../../../intents/node/intentService';
 import { INewWorkspacePreviewContentManager, NewWorkspacePreviewContentManagerImpl } from '../../../intents/node/newIntent';
 import { createExtensionTestingServices } from '../../../test/vscode-node/services';
@@ -36,6 +38,9 @@ suite('Conversation feature test suite', function () {
 		testingServiceCollection.define(IDevContainerConfigurationService, new FailingDevContainerConfigurationService());
 		testingServiceCollection.define(IIntentService, new SyncDescriptor(IntentService));
 		testingServiceCollection.define(ISettingsEditorSearchService, new SyncDescriptor(NoopSettingsEditorSearchService));
+		testingServiceCollection.define(IMergeConflictService, new SyncDescriptor(TestMergeConflictServiceImpl));
+		// We don't need auth in these tests
+		testingServiceCollection.define(IAuthenticationService, new SyncDescriptor(StaticGitHubAuthenticationService, [() => undefined]));
 
 		accessor = testingServiceCollection.createTestingAccessor();
 		instaService = accessor.get(IInstantiationService);
@@ -54,7 +59,7 @@ suite('Conversation feature test suite', function () {
 		extensionContext.subscriptions.forEach(sub => sub.dispose());
 	});
 
-	test.skip("If the 'interactive' namespace is not available, the feature is not enabled and not activated", function () {
+	test.skip(`If the 'interactive' namespace is not available, the feature is not enabled and not activated`, function () {
 		// TODO: The vscode module cannot be stubbed
 		sandbox.stub(vscode, 'interactive').value(undefined);
 
@@ -67,7 +72,7 @@ suite('Conversation feature test suite', function () {
 		}
 	});
 
-	test("If the 'interactive' version does not match, the feature is not enabled and not activated", function () {
+	test(`If the 'interactive' version does not match, the feature is not enabled and not activated`, function () {
 		const conversationFeature = instaService.createInstance(ConversationFeature);
 		try {
 			assert.deepStrictEqual(conversationFeature.enabled, false);

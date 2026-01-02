@@ -9,10 +9,9 @@
  */
 
 
-import { ConfigurationTarget, Uri, window, workspace, WorkspaceFolder } from 'vscode';
-import { Emitter } from '../../../util/vs/base/common/event';
+import { ConfigurationTarget, l10n, Uri, window, workspace, WorkspaceFolder } from 'vscode';
+import { ConfigurationKeyValuePairs, ConfigurationMigration, ConfigurationMigrationRegistry, ConfigurationValue } from '../../../platform/configuration/common/configurationService';
 import { DisposableStore, IDisposable } from '../../../util/vs/base/common/lifecycle';
-import { localize } from '../../../util/vs/nls';
 import { IExtensionContribution } from '../../common/contributions';
 
 
@@ -27,35 +26,13 @@ interface IConfigurationNode {
 export const applicationConfigurationNodeBase = Object.freeze<IConfigurationNode>({
 	'id': 'application',
 	'order': 100,
-	'title': localize('applicationConfigurationTitle', "Application"),
+	'title': l10n.t("Application"),
 	'type': 'object'
 });
 
 export const Extensions = {
 	ConfigurationMigration: 'base.contributions.configuration.migration'
 };
-
-export type ConfigurationValue = { value: any | undefined /* Remove */ };
-export type ConfigurationKeyValuePairs = [string, ConfigurationValue][];
-export type ConfigurationMigrationFn = (value: any) => ConfigurationValue | ConfigurationKeyValuePairs | Promise<ConfigurationValue | ConfigurationKeyValuePairs>;
-export type ConfigurationMigration = { key: string; migrateFn: ConfigurationMigrationFn };
-
-export interface IConfigurationMigrationRegistry {
-	registerConfigurationMigrations(configurationMigrations: ConfigurationMigration[]): void;
-}
-
-class ConfigurationMigrationRegistryImpl implements IConfigurationMigrationRegistry {
-	readonly migrations: ConfigurationMigration[] = [];
-
-	private readonly _onDidRegisterConfigurationMigrations = new Emitter<ConfigurationMigration[]>();
-	readonly onDidRegisterConfigurationMigration = this._onDidRegisterConfigurationMigrations.event;
-
-	registerConfigurationMigrations(configurationMigrations: ConfigurationMigration[]): void {
-		this.migrations.push(...configurationMigrations);
-	}
-}
-
-export const ConfigurationMigrationRegistry = new ConfigurationMigrationRegistryImpl();
 
 export class ConfigurationMigrationContribution implements IExtensionContribution {
 	private readonly _disposables = new DisposableStore();
@@ -135,16 +112,6 @@ export class ConfigurationMigrationContribution implements IExtensionContributio
 }
 
 ConfigurationMigrationRegistry.registerConfigurationMigrations([{
-	key: 'github.copilot.chat.experimental.startDebugging.enabled',
-	migrateFn: async (value: any) => {
-		return [
-			['github.copilot.chat.startDebugging.enabled', { value }],
-			['github.copilot.chat.experimental.startDebugging.enabled', { value: undefined }]
-		];
-	}
-}]);
-
-ConfigurationMigrationRegistry.registerConfigurationMigrations([{
 	key: 'github.copilot.chat.experimental.setupTests.enabled',
 	migrateFn: async (value: any) => {
 		return [
@@ -190,26 +157,6 @@ ConfigurationMigrationRegistry.registerConfigurationMigrations([{
 		return [
 			['github.copilot.chat.generateTests.codeLens', { value }],
 			['github.copilot.chat.experimental.generateTests.codeLens', { value: undefined }]
-		];
-	}
-}]);
-
-ConfigurationMigrationRegistry.registerConfigurationMigrations([{
-	key: 'github.copilot.chat.experimental.temporalContext.enabled',
-	migrateFn: async (value: any) => {
-		return [
-			['github.copilot.chat.editor.temporalContext.enabled', { value }],
-			['github.copilot.chat.experimental.temporalContext.enabled', { value: undefined }]
-		];
-	}
-}]);
-
-ConfigurationMigrationRegistry.registerConfigurationMigrations([{
-	key: 'github.copilot.chat.temporalContext.enabled',
-	migrateFn: async (value: any) => {
-		return [
-			['github.copilot.chat.editor.temporalContext.enabled', { value }],
-			['github.copilot.chat.temporalContext.enabled', { value: undefined }]
 		];
 	}
 }]);

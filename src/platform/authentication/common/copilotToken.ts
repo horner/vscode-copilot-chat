@@ -11,13 +11,36 @@ import { CopilotUserQuotaInfo } from '../../chat/common/chatQuotaService';
  * Whether or not it contains an internal org
  */
 export function containsInternalOrg(orgList: string[]): boolean {
-	// Certain feature right now is limited to a set of allowed organization only (i.e. internal telemetry)
-	// These IDs map to ['Github', 'Microsoft', 'ms-copilot', 'gh-msft-innersource', 'microsoft']
-	const ALLOWED_ORGANIZATIONS = ['4535c7beffc844b46bb1ed4aa04d759a', 'a5db0bcaae94032fe715fb34a5e4bce2', '7184f66dfcee98cb5f08a1cb936d5225',
-		'1cb18ac6eedd49b43d74a1c5beb0b955', 'ea9395b9a9248c05ee6847cbd24355ed'];
+	return containsGitHubOrg(orgList) || containsMicrosoftOrg(orgList);
+}
+
+/**
+ * A function used to determine if the org list contains a GitHub organization
+ * @param orgList The list of organizations the user is a member of
+ * Whether or not it contains a GitHub org
+ */
+function containsGitHubOrg(orgList: string[]): boolean {
+	const GITHUB_ORGANIZATIONS = ['4535c7beffc844b46bb1ed4aa04d759a'];
 	// Check if the user is part of an allowed organization.
 	for (const org of orgList) {
-		if (ALLOWED_ORGANIZATIONS.includes(org)) {
+		if (GITHUB_ORGANIZATIONS.includes(org)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * A function used to determine if the org list contains a Microsoft organization
+ * @param orgList The list of organizations the user is a member of
+ * Whether or not it contains a Microsoft org
+ */
+function containsMicrosoftOrg(orgList: string[]): boolean {
+	const MICROSOFT_ORGANIZATIONS = ['a5db0bcaae94032fe715fb34a5e4bce2', '7184f66dfcee98cb5f08a1cb936d5225',
+		'1cb18ac6eedd49b43d74a1c5beb0b955', 'ea9395b9a9248c05ee6847cbd24355ed'];
+	// Check if the user is part of a Microsoft organization.
+	for (const org of orgList) {
+		if (MICROSOFT_ORGANIZATIONS.includes(org)) {
 			return true;
 		}
 	}
@@ -74,8 +97,20 @@ export class CopilotToken {
 		return containsInternalOrg(this.organizationList);
 	}
 
+	get isMicrosoftInternal(): boolean {
+		return containsMicrosoftOrg(this.organizationList);
+	}
+
+	get isGitHubInternal(): boolean {
+		return containsGitHubOrg(this.organizationList);
+	}
+
 	get isFreeUser(): boolean {
 		return this.sku === 'free_limited_copilot';
+	}
+
+	get isNoAuthUser(): boolean {
+		return this.sku === 'no_auth_limited_copilot';
 	}
 
 	get isChatQuotaExceeded(): boolean {
@@ -86,8 +121,16 @@ export class CopilotToken {
 		return this.isFreeUser && (this._info.limited_user_quotas?.completions ?? 1) <= 0;
 	}
 
+	get codeQuoteEnabled(): boolean {
+		return this._info.code_quote_enabled ?? false;
+	}
+
 	get isVscodeTeamMember(): boolean {
 		return this._info.isVscodeTeamMember;
+	}
+
+	get codexAgentEnabled(): boolean {
+		return this._info.codex_agent_enabled ?? false;
 	}
 
 	get copilotPlan(): 'free' | 'individual' | 'individual_pro' | 'business' | 'enterprise' {
@@ -160,6 +203,10 @@ export class CopilotToken {
 	isExpandedClientSideIndexingEnabled(): boolean {
 		return this._info.blackbird_clientside_indexing === true;
 	}
+
+	isFcv1(): boolean {
+		return this.tokenMap.get('fcv1') === '1';
+	}
 }
 
 /**
@@ -222,7 +269,6 @@ export interface TokenInfo {
 /**
  * A server response containing the user info for the copilot user from the /copilot_internal/user endpoint
  */
-
 export interface CopilotUserInfo extends CopilotUserQuotaInfo {
 	access_type_sku: string;
 	analytics_tracking_id: string;
@@ -235,14 +281,30 @@ export interface CopilotUserInfo extends CopilotUserQuotaInfo {
 		login: string;
 		name: string | null;
 	}>;
+	codex_agent_enabled?: boolean;
 }
 
 // The token info extended with additional metadata that is helpful to have
-export type ExtendedTokenInfo = TokenInfo & { username: string; isVscodeTeamMember: boolean; blackbird_clientside_indexing?: boolean } & Pick<CopilotUserInfo, 'copilot_plan' | 'quota_snapshots' | 'quota_reset_date'>;
+export type ExtendedTokenInfo = TokenInfo & { username: string; isVscodeTeamMember: boolean; blackbird_clientside_indexing?: boolean } & Pick<CopilotUserInfo, 'copilot_plan' | 'quota_snapshots' | 'quota_reset_date' | 'codex_agent_enabled'>;
 
 export type TokenEnvelope = Omit<TokenInfo, 'token' | 'organization_list'>;
 
-export type TokenErrorReason = 'NotAuthorized' | 'FailedToGetToken' | 'TokenInvalid' | 'GitHubLoginFailed' | 'HTTP401' | 'RateLimited';
+/**
+ * Reasons for token retrieval failures.
+ */
+export type TokenErrorReason =
+	/** User doesn't have Copilot access or authorization failed. Includes detailed error_details from server with notification_id specifying the specific authorization issue. */
+	'NotAuthorized' |
+	/** Network request failed - no response received from the server (connection failed, endpoint unreachable, etc.). */
+	'RequestFailed' |
+	/** Server response could not be parsed as JSON (malformed or unexpected response format). */
+	'ParseFailed' |
+	/** User not authenticated with GitHub through VS Code. Only returned from VS Code integration layer, not from platform token minting. */
+	'GitHubLoginFailed' |
+	/** Server returned 401 Unauthorized HTTP status. */
+	'HTTP401' |
+	/** GitHub API rate limit exceeded (403 status with rate limit message). */
+	'RateLimited';
 
 export enum TokenErrorNotificationId {
 	EnterPriseManagedUserAccount = 'enterprise_managed_user_account',

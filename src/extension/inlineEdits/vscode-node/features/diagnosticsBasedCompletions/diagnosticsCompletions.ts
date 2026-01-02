@@ -59,7 +59,11 @@ export abstract class DiagnosticCompletionItem implements vscode.InlineCompletio
 	}
 	get displayLocation(): vscode.InlineCompletionDisplayLocation | undefined {
 		const displayLocation = this.nextEditDisplayLocation;
-		return displayLocation ? { range: toExternalRange(displayLocation.range), label: displayLocation.label } : undefined;
+		return displayLocation ? {
+			range: toExternalRange(displayLocation.range),
+			label: displayLocation.label,
+			kind: vscode.InlineCompletionDisplayLocationKind.Code
+		} : undefined;
 	}
 	get documentId(): DocumentId {
 		return this._workspaceDocument.id;
@@ -127,9 +131,9 @@ export class DiagnosticInlineEditRequestLogContext {
 
 		if (this._error) {
 			lines.push(`## Diagnostics Error`);
-			lines.push("```");
+			lines.push('```');
 			lines.push(errors.toString(errors.fromUnknown(this._error)));
-			lines.push("```");
+			lines.push('```');
 		}
 
 		if (this._logs.length > 0) {

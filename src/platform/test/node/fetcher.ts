@@ -15,7 +15,8 @@ export function createFakeResponse(statusCode: number, response: any = 'body') {
 		new FakeHeaders(),
 		() => Promise.resolve(JSON.stringify(response)),
 		() => Promise.resolve(response),
-		async () => null
+		async () => null,
+		'test-stub'
 	);
 }
 
@@ -27,7 +28,8 @@ export function createFakeStreamResponse(body: string | string[] | { chunk: stri
 		new FakeHeaders(),
 		async () => chunks.join(''),
 		async () => null,
-		async () => toStream(chunks, cts)
+		async () => toStream(chunks, cts),
+		'test-stub'
 	);
 }
 
@@ -56,7 +58,7 @@ function toStream(strings: string[] | { chunk: string; shouldCancelStream: boole
 	}
 }
 
-class FakeHeaders implements IHeaders {
+export class FakeHeaders implements IHeaders {
 	private readonly headers: Map<string, string> = new Map();
 
 	get(name: string): string | null {

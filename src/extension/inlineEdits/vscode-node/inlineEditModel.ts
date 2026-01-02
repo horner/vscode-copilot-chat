@@ -3,8 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as vscode from 'vscode';
-import { TextDocumentChangeReason, window } from 'vscode';
+import type * as vscode from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { DocumentId } from '../../../platform/inlineEdits/common/dataTypes/documentId';
 import { IStatelessNextEditProvider } from '../../../platform/inlineEdits/common/statelessNextEditProvider';
@@ -12,11 +11,14 @@ import { NesHistoryContextProvider } from '../../../platform/inlineEdits/common/
 import { NesXtabHistoryTracker } from '../../../platform/inlineEdits/common/workspaceEditTracker/nesXtabHistoryTracker';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
+import { IWorkspaceService } from '../../../platform/workspace/common/workspaceService';
+import { isNotebookCell } from '../../../util/common/notebooks';
 import { ITracer, createTracer } from '../../../util/common/tracing';
-import { Disposable, DisposableMap, toDisposable } from '../../../util/vs/base/common/lifecycle';
+import { Disposable, DisposableMap, IDisposable, MutableDisposable } from '../../../util/vs/base/common/lifecycle';
 import { IObservableSignal, observableSignal } from '../../../util/vs/base/common/observableInternal';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
-import { CompletionsProvider } from '../../completions/vscode-node/completionsProvider';
+import { TextDocumentChangeReason } from '../../../vscodeTypes';
+import { createTimeout } from '../common/common';
 import { createNextEditProvider } from '../node/createNextEditProvider';
 import { DebugRecorder } from '../node/debugRecorder';
 import { NextEditProvider } from '../node/nextEditProvider';
@@ -33,7 +35,7 @@ export class InlineEditModel extends Disposable {
 
 	private readonly _predictor: IStatelessNextEditProvider;
 
-	public readonly inlineEditsInlineCompletionsEnabled = this._configurationService.getConfigObservable(ConfigKey.Internal.InlineEditsInlineCompletionsEnabled);
+	public readonly inlineEditsInlineCompletionsEnabled = this._configurationService.getConfigObservable(ConfigKey.TeamInternal.InlineEditsInlineCompletionsEnabled);
 
 	public readonly onChange = observableSignal(this);
 
@@ -42,21 +44,19 @@ export class InlineEditModel extends Disposable {
 		public readonly workspace: VSCodeWorkspace,
 		historyContextProvider: NesHistoryContextProvider,
 		public readonly diagnosticsBasedProvider: DiagnosticsNextEditProvider | undefined,
-		public readonly completionsProvider: CompletionsProvider | undefined,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
-		@ILogService private readonly _logService: ILogService,
-		@IExperimentationService private readonly _expService: IExperimentationService
+		@IExperimentationService private readonly _expService: IExperimentationService,
 	) {
 		super();
 
 		this._predictor = createNextEditProvider(this._predictorId, this._instantiationService);
-		const xtabDiffNEntries = this._configurationService.getExperimentBasedConfig(ConfigKey.Internal.InlineEditsXtabDiffNEntries, this._expService);
+		const xtabDiffNEntries = this._configurationService.getExperimentBasedConfig(ConfigKey.TeamInternal.InlineEditsXtabDiffNEntries, this._expService);
 		const xtabHistoryTracker = new NesXtabHistoryTracker(this.workspace, xtabDiffNEntries);
 		this.nextEditProvider = this._instantiationService.createInstance(NextEditProvider, this.workspace, this._predictor, historyContextProvider, xtabHistoryTracker, this.debugRecorder);
 
 		if (this._predictor.dependsOnSelection) {
-			this._register(new InlineEditTriggerer(this.workspace, this.nextEditProvider, this.onChange, this._logService, this._configurationService, this._expService));
+			this._register(this._instantiationService.createInstance(InlineEditTriggerer, this.workspace, this.nextEditProvider, this.onChange));
 		}
 	}
 }
@@ -65,17 +65,7 @@ class LastChange extends Disposable {
 	public lastEditedTimestamp: number;
 	public lineNumberTriggers: Map<number /* lineNumber */, number /* timestamp */>;
 
-	private _timeout: NodeJS.Timeout | undefined;
-	public set timeout(value: NodeJS.Timeout | undefined) {
-		if (value !== undefined) {
-			// TODO: we can end up collecting multiple timeouts, but also they could be cleared as debouncing happens
-			this._register(toDisposable(() => clearTimeout(value)));
-		}
-		this._timeout = value;
-	}
-	public get timeout(): NodeJS.Timeout | undefined {
-		return this._timeout;
-	}
+	public readonly timeout = this._register(new MutableDisposable<IDisposable>());
 
 	private _nConsecutiveSelectionChanges = 0;
 	public get nConsequtiveSelectionChanges(): number {
@@ -85,17 +75,19 @@ class LastChange extends Disposable {
 		this._nConsecutiveSelectionChanges++;
 	}
 
-	constructor() {
+	constructor(public documentTrigger: vscode.TextDocument) {
 		super();
 		this.lastEditedTimestamp = Date.now();
 		this.lineNumberTriggers = new Map();
-		this.timeout = undefined;
 	}
 }
 
-class InlineEditTriggerer extends Disposable {
+export class InlineEditTriggerer extends Disposable {
 
 	private readonly docToLastChangeMap = this._register(new DisposableMap<DocumentId, LastChange>());
+
+	private lastDocWithSelectionUri: string | undefined;
+	private lastEditTimestamp: number | undefined;
 
 	private readonly _tracer: ITracer;
 
@@ -106,6 +98,7 @@ class InlineEditTriggerer extends Disposable {
 		@ILogService private readonly _logService: ILogService,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@IExperimentationService private readonly _expService: IExperimentationService,
+		@IWorkspaceService private readonly _workspaceService: IWorkspaceService
 	) {
 		super();
 
@@ -114,7 +107,7 @@ class InlineEditTriggerer extends Disposable {
 		this.registerListeners();
 	}
 
-	public registerListeners() {
+	private registerListeners() {
 		this._registerDocumentChangeListener();
 		this._registerSelectionChangeListener();
 	}
@@ -124,10 +117,12 @@ class InlineEditTriggerer extends Disposable {
 	}
 
 	private _registerDocumentChangeListener() {
-		this._store.add(this._register(vscode.workspace.onDidChangeTextDocument(e => {
+		this._register(this._workspaceService.onDidChangeTextDocument(e => {
 			if (this._shouldIgnoreDoc(e.document)) {
 				return;
 			}
+
+			this.lastEditTimestamp = Date.now();
 
 			const tracer = this._tracer.sub('onDidChangeTextDocument');
 
@@ -143,17 +138,20 @@ class InlineEditTriggerer extends Disposable {
 				return;
 			}
 
-			this.docToLastChangeMap.set(doc.id, new LastChange());
+			this.docToLastChangeMap.set(doc.id, new LastChange(e.document));
 
 			tracer.returns('setting last edited timestamp');
-		})));
+		}));
 	}
 
 	private _registerSelectionChangeListener() {
-		this._store.add(this._register(window.onDidChangeTextEditorSelection((e) => {
+		this._register(this._workspaceService.onDidChangeTextEditorSelection((e) => {
 			if (this._shouldIgnoreDoc(e.textEditor.document)) {
 				return;
 			}
+
+			const isSameDoc = this.lastDocWithSelectionUri === e.textEditor.document.uri.toString();
+			this.lastDocWithSelectionUri = e.textEditor.document.uri.toString();
 
 			const tracer = this._tracer.sub('onDidChangeTextEditorSelection');
 
@@ -184,14 +182,18 @@ class InlineEditTriggerer extends Disposable {
 
 			const mostRecentChange = this.docToLastChangeMap.get(doc.id);
 			if (!mostRecentChange) {
-				tracer.returns('document not tracked - does not have recent changes');
+				if (!this._maybeTriggerOnDocumentSwitch(e, isSameDoc, tracer)) {
+					tracer.returns('document not tracked - does not have recent changes');
+				}
 				return;
 			}
 
 			const hasRecentEdit = timeSince(mostRecentChange.lastEditedTimestamp) < TRIGGER_INLINE_EDIT_AFTER_CHANGE_LIMIT;
 
 			if (!hasRecentEdit) {
-				tracer.returns('no recent edit');
+				if (!this._maybeTriggerOnDocumentSwitch(e, isSameDoc, tracer)) {
+					tracer.returns('no recent edit');
+				}
 				return;
 			}
 
@@ -199,15 +201,31 @@ class InlineEditTriggerer extends Disposable {
 			if (!hasRecentTrigger) {
 				// the provider was not triggered recently, so we might be observing a cursor change event following
 				// a document edit caused outside of regular typing, otherwise the UI would have invoked us recently
-				tracer.returns('no recent trigger');
+				if (!this._maybeTriggerOnDocumentSwitch(e, isSameDoc, tracer)) {
+					tracer.returns('no recent trigger');
+				}
 				return;
 			}
 
-			const selectionLine = e.selections[0].active.line;
-			const lastTriggerTimestampForLine = mostRecentChange.lineNumberTriggers.get(selectionLine);
-			if (lastTriggerTimestampForLine !== undefined && timeSince(lastTriggerTimestampForLine) < TRIGGER_INLINE_EDIT_ON_SAME_LINE_COOLDOWN) {
-				tracer.returns('same line cooldown');
+			const range = doc.toRange(e.textEditor.document, e.selections[0]);
+			if (!range) {
+				tracer.returns('no range');
 				return;
+			}
+
+			const selectionLine = range.start.line;
+
+			const triggerOnActiveEditorChange = this._configurationService.getExperimentBasedConfig(ConfigKey.Advanced.InlineEditsTriggerOnEditorChangeAfterSeconds, this._expService);
+			// If we're in a notebook cell,
+			// Its possible user made changes in one cell and now is moving to another cell
+			// In such cases we should account for the possibility of the user wanting to edit the new cell and trigger suggestions.
+			if (!triggerOnActiveEditorChange &&
+				(!isNotebookCell(e.textEditor.document.uri) || e.textEditor.document === mostRecentChange.documentTrigger)) {
+				const lastTriggerTimestampForLine = mostRecentChange.lineNumberTriggers.get(selectionLine);
+				if (lastTriggerTimestampForLine !== undefined && timeSince(lastTriggerTimestampForLine) < TRIGGER_INLINE_EDIT_ON_SAME_LINE_COOLDOWN) {
+					tracer.returns('same line cooldown');
+					return;
+				}
 			}
 
 			// TODO: Do not trigger if there is an existing valid request now running, ie don't use just last-trigger timestamp
@@ -222,9 +240,10 @@ class InlineEditTriggerer extends Disposable {
 			}
 
 			mostRecentChange.lineNumberTriggers.set(selectionLine, now);
+			mostRecentChange.documentTrigger = e.textEditor.document;
 			tracer.returns('triggering inline edit');
 
-			const debounceOnSelectionChange = this._configurationService.getExperimentBasedConfig(ConfigKey.Internal.InlineEditsDebounceOnSelectionChange, this._expService);
+			const debounceOnSelectionChange = this._configurationService.getExperimentBasedConfig(ConfigKey.TeamInternal.InlineEditsDebounceOnSelectionChange, this._expService);
 			if (debounceOnSelectionChange === undefined) {
 				this._triggerInlineEdit();
 			} else {
@@ -234,17 +253,56 @@ class InlineEditTriggerer extends Disposable {
 				if (mostRecentChange.nConsequtiveSelectionChanges < N_ALLOWED_IMMEDIATE_SELECTION_CHANGE_EVENTS) {
 					this._triggerInlineEdit();
 				} else {
-					if (mostRecentChange.timeout) {
-						clearTimeout(mostRecentChange.timeout);
-					}
-					mostRecentChange.timeout = setTimeout(() => {
-						mostRecentChange.timeout = undefined;
-						this._triggerInlineEdit();
-					}, debounceOnSelectionChange);
+					mostRecentChange.timeout.value = createTimeout(debounceOnSelectionChange, () => this._triggerInlineEdit());
 				}
 				mostRecentChange.incrementSelectionChangeEventCount();
 			}
-		})));
+		}));
+	}
+
+	private _maybeTriggerOnDocumentSwitch(e: vscode.TextEditorSelectionChangeEvent, isSameDoc: boolean, parentTracer: ITracer): boolean {
+		const tracer = parentTracer.subNoEntry('editorSwitch');
+		const triggerAfterSeconds = this._configurationService.getExperimentBasedConfig(ConfigKey.Advanced.InlineEditsTriggerOnEditorChangeAfterSeconds, this._expService);
+		if (triggerAfterSeconds === undefined) {
+			tracer.trace('document switch disabled');
+			return false;
+		}
+		if (isSameDoc) {
+			tracer.returns(`document switch didn't happen`);
+			return false;
+		}
+		if (this.lastEditTimestamp === undefined) {
+			tracer.returns('no last edit timestamp');
+			return false;
+		}
+		const timeSinceLastEdit = Date.now() - this.lastEditTimestamp;
+		if (timeSinceLastEdit > triggerAfterSeconds * 1000) {
+			tracer.returns('too long since last edit');
+			return false;
+		}
+
+		const doc = this.workspace.getDocumentByTextDocument(e.textEditor.document);
+		if (!doc) { // doc is likely copilot-ignored
+			tracer.returns('ignored document');
+			return false;
+		}
+
+		const range = doc.toRange(e.textEditor.document, e.selections[0]);
+		if (!range) {
+			tracer.returns('no range');
+			return false;
+		}
+
+		const selectionLine = range.start.line;
+
+		// mark as touched such that NES gets triggered on cursor move; otherwise, user may get a single NES then move cursor and never get the suggestion back
+		const lastChange = new LastChange(e.textEditor.document);
+		lastChange.lineNumberTriggers.set(selectionLine, Date.now());
+		this.docToLastChangeMap.set(doc.id, lastChange);
+
+		tracer.returns('triggering on document switch');
+		this._triggerInlineEdit();
+		return true;
 	}
 
 	private _triggerInlineEdit() {

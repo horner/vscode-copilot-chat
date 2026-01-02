@@ -5,6 +5,7 @@
 
 
 import { SyncDescriptor } from '../../../util/vs/platform/instantiation/common/descriptors';
+import { InlineChatIntent } from '../../inlineChat/node/inlineChatIntent';
 import { IntentRegistry } from '../../prompt/node/intentRegistry';
 import { AgentIntent } from './agentIntent';
 import { AskAgentIntent } from './askAgentIntent';
@@ -22,7 +23,6 @@ import { SearchIntent } from './searchIntent';
 import { SearchKeywordsIntent } from './searchKeywordsIntent';
 import { SearchPanelIntent } from './searchPanelIntent';
 import { SetupTestsIntent } from './setupTests';
-import { StartDebuggingIntent } from './startDebugging';
 import { TerminalExplainIntent } from './terminalExplainIntent';
 import { TerminalIntent } from './terminalIntent';
 import { TestsIntent } from './testIntent/testIntent';
@@ -48,10 +48,10 @@ IntentRegistry.setIntents([
 	new SyncDescriptor(NewNotebookIntent),
 	new SyncDescriptor(NewWorkspaceIntent),
 	new SyncDescriptor(VscodeIntent),
-	new SyncDescriptor(StartDebuggingIntent),
 	new SyncDescriptor(SetupTestsIntent),
 	new SyncDescriptor(SearchPanelIntent),
 	new SyncDescriptor(SearchKeywordsIntent),
 	new SyncDescriptor(AskAgentIntent),
-	new SyncDescriptor(NotebookEditorIntent)
+	new SyncDescriptor(NotebookEditorIntent),
+	new SyncDescriptor(InlineChatIntent)
 ]);

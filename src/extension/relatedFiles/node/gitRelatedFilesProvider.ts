@@ -11,6 +11,7 @@ import { IFileSystemService } from '../../../platform/filesystem/common/fileSyst
 import { IGitService } from '../../../platform/git/common/gitService';
 import { Commit } from '../../../platform/git/vscode/git';
 import { IWorkspaceService } from '../../../platform/workspace/common/workspaceService';
+import { TelemetryCorrelationId } from '../../../util/common/telemetryCorrelationId';
 import { intersection, SetWithKey } from '../../../util/vs/base/common/collections';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { ResourceMap, ResourceSet } from '../../../util/vs/base/common/map';
@@ -38,7 +39,7 @@ export class GitRelatedFilesProvider extends Disposable implements vscode.ChatRe
 	) {
 		super();
 
-		if (this._configurationService.getConfig(ConfigKey.Internal.GitHistoryRelatedFilesUsingEmbeddings)) {
+		if (this._configurationService.getConfig(ConfigKey.Advanced.GitHistoryRelatedFilesUsingEmbeddings)) {
 			// Index the latest 200 commits in the background
 			// TODO@joyceerhl reindex incrementally when repository state changes
 			// TODO@joyceerhl use only the changes from main branch?
@@ -68,7 +69,7 @@ export class GitRelatedFilesProvider extends Disposable implements vscode.ChatRe
 			return this.getCommitsForPromptWithoutFiles(chatRequest, token);
 		}
 
-		if (this._configurationService.getConfig(ConfigKey.Internal.GitHistoryRelatedFilesUsingEmbeddings)) {
+		if (this._configurationService.getConfig(ConfigKey.Advanced.GitHistoryRelatedFilesUsingEmbeddings)) {
 			return this.computeRelevantCommits(chatRequest, token);
 		}
 
@@ -152,10 +153,7 @@ export class GitRelatedFilesProvider extends Disposable implements vscode.ChatRe
 		// Calculate the embeddings for the commits we don't have cached embeddings for
 		const commitMessages = commitsToComputeEmbeddingsFor.map((commit) => commit.commit.message);
 		const text = prompt ? [prompt, ...commitMessages] : commitMessages;
-		const result = await this._embeddingsComputer.computeEmbeddings(EmbeddingType.text3small_512, text, {}, token);
-		if (!result) {
-			return undefined;
-		}
+		const result = await this._embeddingsComputer.computeEmbeddings(EmbeddingType.text3small_512, text, {}, new TelemetryCorrelationId('GitRelatedFilesProvider::computeCommitMessageEmbeddings'), token);
 
 		const embeddings = result.values;
 		const promptEmbedding = prompt ? embeddings[0] : undefined;

@@ -4,16 +4,19 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { PromptReference, Raw } from '@vscode/prompt-tsx';
-import type { ChatRequestEditedFileEvent, ChatResponseStream, ChatResult, LanguageModelToolResult } from 'vscode';
+import type { ChatRequest, ChatRequestEditedFileEvent, ChatResponseStream, ChatResult, LanguageModelToolResult } from 'vscode';
 import { FilterReason } from '../../../platform/networking/common/openai';
+import { IWorkspaceService } from '../../../platform/workspace/common/workspaceService';
 import { isLocation, toLocation } from '../../../util/common/types';
 import { ResourceMap } from '../../../util/vs/base/common/map';
 import { assertType } from '../../../util/vs/base/common/types';
 import { URI } from '../../../util/vs/base/common/uri';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
+import { ServicesAccessor } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { Location, Range } from '../../../vscodeTypes';
 import { InternalToolReference, IToolCallRound } from '../common/intents';
 import { ChatVariablesCollection } from './chatVariablesCollection';
+import { isContinueOnError, isToolCallLimitAcceptance } from './specialRequestTypes';
 import { ToolCallRound } from './toolCallRound';
 export { PromptReference } from '@vscode/prompt-tsx';
 
@@ -58,16 +61,33 @@ export class Turn {
 
 	private _responseInfo?: { message: TurnMessage | undefined; status: TurnStatus; responseId: string | undefined; chatResult?: ChatResult };
 
-	private readonly _metadata = new Map<any, any[]>();
+	private readonly _metadata = new Map<unknown, unknown[]>();
 
 	public readonly startTime = Date.now();
+
+	static fromRequest(
+		id: string | undefined,
+		request: ChatRequest
+	) {
+		return new Turn(
+			id,
+			{ message: request.prompt, type: 'user' },
+			new ChatVariablesCollection(request.references),
+			request.toolReferences.map(InternalToolReference.from),
+			request.editedFileEvents,
+			request.acceptedConfirmationData,
+			isToolCallLimitAcceptance(request) || isContinueOnError(request),
+		);
+	}
 
 	constructor(
 		readonly id: string = generateUuid(),
 		readonly request: TurnMessage,
 		private readonly _promptVariables: ChatVariablesCollection | undefined = undefined,
 		private readonly _toolReferences: readonly InternalToolReference[] = [],
-		readonly editedFileEvents?: ChatRequestEditedFileEvent[]
+		readonly editedFileEvents?: ChatRequestEditedFileEvent[],
+		readonly acceptedConfirmationData?: unknown[],
+		readonly isContinuation = false
 	) { }
 
 	get promptVariables(): ChatVariablesCollection | undefined {
@@ -113,13 +133,23 @@ export class Turn {
 		return metadata?.renderedUserMessage;
 	}
 
+	// TODO@roblourens Tracking result data in "agent as chat participant" is difficult and will be replaced in the future.
+	// This is likely a Turn from Ask mode that does not have tool call rounds.
+	// Use consistent instances so we can save state on them.
+	private _filledInMissingRounds: IToolCallRound[] | undefined;
+
 	get rounds(): readonly IToolCallRound[] {
 		const metadata = this.resultMetadata;
 		const rounds = metadata?.toolCallRounds;
 		if (!rounds || rounds.length === 0) {
+			if (this._filledInMissingRounds?.length) {
+				return this._filledInMissingRounds;
+			}
+
 			// Should always have at least one round
 			const response = this.responseMessage?.message ?? '';
-			return [new ToolCallRound(response, [], undefined, this.id)];
+			this._filledInMissingRounds = [new ToolCallRound(response, [], undefined, this.id)];
+			return this._filledInMissingRounds;
 		}
 
 		return rounds;
@@ -137,13 +167,17 @@ export class Turn {
 
 
 	// --- metadata
+	// Using 'any' for constructor args here because TS will complain about passing any class if 'unknown' is used, I'm not totally sure why.
+	// The idea of this is that you pass in a class and we return instances of that class.
 
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	getMetadata<T extends object>(key: new (...args: any[]) => T): T | undefined {
-		return this._metadata.get(key)?.at(-1);
+		return this._metadata.get(key)?.at(-1) as T | undefined;
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	getAllMetadata<T extends object>(key: new (...args: any[]) => T): T[] | undefined {
-		return this._metadata.get(key);
+		return this._metadata.get(key) as T[] | undefined;
 	}
 
 	setMetadata<T extends object>(value: T): void {
@@ -316,6 +350,7 @@ export interface IResultMetadata {
 	/** The user message exactly as it must be rendered in history. Should not be optional, but not every prompt will adopt this immediately */
 	renderedUserMessage?: Raw.ChatCompletionContentPart[];
 	renderedGlobalContext?: Raw.ChatCompletionContentPart[];
+	globalContextCacheKey?: string;
 	command?: string;
 	filterCategory?: FilterReason;
 
@@ -348,5 +383,11 @@ export class RenderedUserMessageMetadata {
 export class GlobalContextMessageMetadata {
 	constructor(
 		readonly renderedGlobalContext: Raw.ChatCompletionContentPart[],
+		readonly cacheKey: string
 	) { }
+}
+
+export function getGlobalContextCacheKey(accessor: ServicesAccessor): string {
+	const workspaceService = accessor.get(IWorkspaceService);
+	return workspaceService.getWorkspaceFolders().map(folder => folder.toString()).join(',');
 }

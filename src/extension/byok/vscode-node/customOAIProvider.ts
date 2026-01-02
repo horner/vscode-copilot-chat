@@ -3,20 +3,22 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatRequestHandleOptions, Progress, QuickPickItem, window } from 'vscode';
+import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelResponsePart2, Progress, ProvideLanguageModelChatResponseOptions, QuickPickItem, window } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
+import { EndpointEditToolName, IChatModelInformation, isEndpointEditToolName, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { CopilotLanguageModelWrapper } from '../../conversation/vscode-node/languageModelAccess';
-import { BYOKAuthType, BYOKKnownModels, BYOKModelProvider, LMResponsePart, resolveModelInfo } from '../common/byokProvider';
+import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities, BYOKModelProvider, resolveModelInfo } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { IBYOKStorageService } from './byokStorageService';
 import { promptForAPIKey } from './byokUIService';
+import { CustomOAIModelConfigurator } from './customOAIModelConfigurator';
 
 export function resolveCustomOAIUrl(modelId: string, url: string): string {
 	// The fully resolved url was already passed in
-	if (url.includes('/chat/completions')) {
+	if (hasExplicitApiPath(url)) {
 		return url;
 	}
 
@@ -24,18 +26,29 @@ export function resolveCustomOAIUrl(modelId: string, url: string): string {
 	if (url.endsWith('/')) {
 		url = url.slice(0, -1);
 	}
-	// if url ends with `/v1` remove it
-	if (url.endsWith('/v1')) {
-		url = url.slice(0, -3);
+
+	// Default to chat completions for base URLs
+	const defaultApiPath = '/chat/completions';
+
+	// Check if URL already contains any version pattern like /v1, /v2, etc
+	const versionPattern = /\/v\d+$/;
+	if (versionPattern.test(url)) {
+		return `${url}${defaultApiPath}`;
 	}
 
 	// For standard OpenAI-compatible endpoints, just append the standard path
-	return `${url}/v1/chat/completions`;
+	return `${url}/v1${defaultApiPath}`;
 }
 
-interface CustomOAIModelInfo extends LanguageModelChatInformation {
+export function hasExplicitApiPath(url: string): boolean {
+	return url.includes('/responses') || url.includes('/chat/completions');
+}
+
+export interface CustomOAIModelInfo extends LanguageModelChatInformation {
 	url: string;
 	thinking: boolean;
+	requestHeaders?: Record<string, string>;
+	zeroDataRetentionEnabled?: boolean;
 }
 
 export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIModelInfo> {
@@ -63,8 +76,19 @@ export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIMo
 		return resolveCustomOAIUrl(modelId, url);
 	}
 
-	private getUserModelConfig(): Record<string, { name: string; url: string; toolCalling: boolean; vision: boolean; maxInputTokens: number; maxOutputTokens: number; requiresAPIKey: boolean; thinking?: boolean }> {
-		const modelConfig = this._configurationService.getConfig(this.getConfigKey()) as Record<string, { name: string; url: string; toolCalling: boolean; vision: boolean; maxInputTokens: number; maxOutputTokens: number; requiresAPIKey: boolean; thinking?: boolean }>;
+	protected async getModelInfo(modelId: string, apiKey: string | undefined, modelCapabilities?: BYOKModelCapabilities): Promise<IChatModelInformation> {
+		const modelInfo = await resolveModelInfo(modelId, this.providerName, undefined, modelCapabilities);
+		if (modelCapabilities?.url?.includes('/responses')) {
+			modelInfo.supported_endpoints = [
+				ModelSupportedEndpoint.ChatCompletions,
+				ModelSupportedEndpoint.Responses
+			];
+		}
+		return modelInfo;
+	}
+
+	private getUserModelConfig(): Record<string, { name: string; url: string; toolCalling: boolean; vision: boolean; maxInputTokens: number; maxOutputTokens: number; requiresAPIKey: boolean; thinking?: boolean; editTools?: EndpointEditToolName[]; requestHeaders?: Record<string, string>; zeroDataRetentionEnabled?: boolean }> {
+		const modelConfig = this._configurationService.getConfig(this.getConfigKey()) as Record<string, { name: string; url: string; toolCalling: boolean; vision: boolean; maxInputTokens: number; maxOutputTokens: number; requiresAPIKey: boolean; thinking?: boolean; editTools?: EndpointEditToolName[]; requestHeaders?: Record<string, string>; zeroDataRetentionEnabled?: boolean }>;
 		return modelConfig;
 	}
 
@@ -73,24 +97,31 @@ export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIMo
 		return userModelConfig[modelId]?.requiresAPIKey !== false;
 	}
 
-	private async getAllModels(): Promise<BYOKKnownModels> {
+	protected async getAllModels(): Promise<BYOKKnownModels> {
 		const modelConfig = this.getUserModelConfig();
 		const models: BYOKKnownModels = {};
+
 		for (const [modelId, modelInfo] of Object.entries(modelConfig)) {
+			const resolvedUrl = this.resolveUrl(modelId, modelInfo.url);
+			this._logService.info(`BYOK: Resolved URL for model ${this.providerName}/${modelId}: ${resolvedUrl}`);
+
 			models[modelId] = {
 				name: modelInfo.name,
-				url: this.resolveUrl(modelId, modelInfo.url),
+				url: resolvedUrl,
 				toolCalling: modelInfo.toolCalling,
 				vision: modelInfo.vision,
 				maxInputTokens: modelInfo.maxInputTokens,
 				maxOutputTokens: modelInfo.maxOutputTokens,
 				thinking: modelInfo.thinking,
+				editTools: modelInfo.editTools,
+				requestHeaders: modelInfo.requestHeaders ? { ...modelInfo.requestHeaders } : undefined,
+				zeroDataRetentionEnabled: modelInfo.zeroDataRetentionEnabled
 			};
 		}
 		return models;
 	}
 
-	private async getModelsWithAPIKeys(silent: boolean): Promise<BYOKKnownModels> {
+	protected async getModelsWithCredentials(silent: boolean): Promise<BYOKKnownModels> {
 		const models = await this.getAllModels();
 		const modelsWithApiKeys: BYOKKnownModels = {};
 		for (const [modelId, modelInfo] of Object.entries(models)) {
@@ -126,16 +157,23 @@ export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIMo
 			tooltip: `${capabilities.name} is contributed via the ${this.providerName} provider.`,
 			capabilities: {
 				toolCalling: capabilities.toolCalling,
-				vision: capabilities.vision
+				imageInput: capabilities.vision,
+				editTools: capabilities.editTools
 			},
 			thinking: capabilities.thinking || false,
+			requestHeaders: capabilities.requestHeaders,
+			zeroDataRetentionEnabled: capabilities.zeroDataRetentionEnabled
 		};
 		return baseInfo;
 	}
 
-	async prepareLanguageModelChatInformation(options: { silent: boolean }, token: CancellationToken): Promise<CustomOAIModelInfo[]> {
+	async provideLanguageModelChatInformation(options: { silent: boolean }, token: CancellationToken): Promise<CustomOAIModelInfo[]> {
 		try {
-			const knownModels = await this.getModelsWithAPIKeys(options.silent);
+			let knownModels = await this.getModelsWithCredentials(options.silent);
+			if (Object.keys(knownModels).length === 0 && !options.silent) {
+				await new CustomOAIModelConfigurator(this._configurationService, this.providerName.toLowerCase(), this).configure(true);
+				knownModels = await this.getModelsWithCredentials(options.silent);
+			}
 			return Object.entries(knownModels).map(([id, capabilities]) => {
 				return this.createModelInfo(id, capabilities);
 			});
@@ -144,7 +182,7 @@ export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIMo
 		}
 	}
 
-	async provideLanguageModelChatResponse(model: CustomOAIModelInfo, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: LanguageModelChatRequestHandleOptions, progress: Progress<LMResponsePart>, token: CancellationToken): Promise<any> {
+	async provideLanguageModelChatResponse(model: CustomOAIModelInfo, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
 		const requireAPIKey = this.requiresAPIKey(model.id);
 		let apiKey: string | undefined;
 		if (requireAPIKey) {
@@ -154,17 +192,20 @@ export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIMo
 				throw new Error(`No API key found for model ${model.id}`);
 			}
 		}
-		const modelInfo = resolveModelInfo(model.id, this.providerName, undefined, {
+		const modelInfo = await this.getModelInfo(model.id, apiKey, {
 			maxInputTokens: model.maxInputTokens,
 			maxOutputTokens: model.maxOutputTokens,
 			toolCalling: !!model.capabilities?.toolCalling || false,
-			vision: !!model.capabilities?.vision || false,
+			vision: !!model.capabilities?.imageInput || false,
 			name: model.name,
 			url: model.url,
-			thinking: model.thinking
+			thinking: model.thinking,
+			editTools: model.capabilities.editTools?.filter(isEndpointEditToolName),
+			requestHeaders: model.requestHeaders,
+			zeroDataRetentionEnabled: model.zeroDataRetentionEnabled
 		});
 		const openAIChatEndpoint = this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, apiKey ?? '', model.url);
-		return this._lmWrapper.provideLanguageModelResponse(openAIChatEndpoint, messages, options, options.extensionId, progress, token);
+		return this._lmWrapper.provideLanguageModelResponse(openAIChatEndpoint, messages, options, options.requestInitiator, progress, token);
 	}
 
 	async provideTokenCount(model: CustomOAIModelInfo, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {
@@ -178,14 +219,16 @@ export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIMo
 			}
 		}
 
-		const modelInfo = resolveModelInfo(model.id, this.providerName, undefined, {
+		const modelInfo = await this.getModelInfo(model.id, apiKey, {
 			maxInputTokens: model.maxInputTokens,
 			maxOutputTokens: model.maxOutputTokens,
 			toolCalling: !!model.capabilities?.toolCalling || false,
-			vision: !!model.capabilities?.vision || false,
+			vision: !!model.capabilities?.imageInput || false,
 			name: model.name,
 			url: model.url,
-			thinking: model.thinking
+			thinking: model.thinking,
+			requestHeaders: model.requestHeaders,
+			zeroDataRetentionEnabled: model.zeroDataRetentionEnabled
 		});
 		const openAIChatEndpoint = this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, apiKey ?? '', model.url);
 		return this._lmWrapper.provideTokenCount(openAIChatEndpoint, text);
@@ -251,5 +294,21 @@ export class CustomOAIBYOKModelProvider implements BYOKModelProvider<CustomOAIMo
 				await window.showInformationMessage(`API key for ${selectedModel.label} has been updated.`);
 			}
 		}
+	}
+
+	public async updateAPIKeyViaCmd(envVarName: string, action: 'update' | 'remove' = 'update', modelId: string): Promise<void> {
+		if (action === 'remove') {
+			await this._byokStorageService.deleteAPIKey(this.providerName, this.authType, modelId);
+			this._logService.info(`BYOK: API key removed for provider ${this.providerName}${modelId ? ` and model ${modelId}` : ''}`);
+			return;
+		}
+
+		const apiKey = process.env[envVarName];
+		if (!apiKey) {
+			throw new Error(`BYOK: Environment variable ${envVarName} not found or empty for API key management`);
+		}
+
+		await this._byokStorageService.storeAPIKey(this.providerName, apiKey, this.authType, modelId);
+		this._logService.info(`BYOK: API key updated for provider ${this.providerName}${modelId ? ` and model ${modelId}` : ''} from environment variable ${envVarName}`);
 	}
 }

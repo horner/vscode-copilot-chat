@@ -22,11 +22,20 @@ export class EnvServiceImpl implements IEnvService {
 	public get machineId(): string {
 		return vscode.env.machineId;
 	}
+	public get devDeviceId(): string {
+		return vscode.env.devDeviceId;
+	}
 	public get vscodeVersion(): string {
 		return vscode.version;
 	}
 	public get remoteName(): string | undefined {
 		return vscode.env.remoteName;
+	}
+	public get uiKind(): 'desktop' | 'web' {
+		switch (vscode.env.uiKind) {
+			case vscode.UIKind.Desktop: return 'desktop';
+			case vscode.UIKind.Web: return 'web';
+		}
 	}
 
 	public get isActive(): boolean {

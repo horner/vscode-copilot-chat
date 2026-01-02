@@ -6,7 +6,7 @@
 declare module 'vscode' {
 
 	export interface ChatParticipant {
-		onDidPerformAction: Event<ChatUserActionEvent>;
+		readonly onDidPerformAction: Event<ChatUserActionEvent>;
 	}
 
 	/**
@@ -32,7 +32,8 @@ declare module 'vscode' {
 	export class ChatResponseCodeblockUriPart {
 		isEdit?: boolean;
 		value: Uri;
-		constructor(value: Uri, isEdit?: boolean);
+		undoStopId?: string;
+		constructor(value: Uri, isEdit?: boolean, undoStopId?: string);
 	}
 
 	/**
@@ -84,8 +85,98 @@ declare module 'vscode' {
 		constructor(toolName: string);
 	}
 
-	export type ExtendedChatResponsePart = ChatResponsePart | ChatResponseTextEditPart | ChatResponseNotebookEditPart | ChatResponseConfirmationPart | ChatResponseCodeCitationPart | ChatResponseReferencePart2 | ChatResponseMovePart | ChatResponseExtensionsPart | ChatResponsePullRequestPart | ChatPrepareToolInvocationPart;
+	export interface ChatTerminalToolInvocationData {
+		commandLine: {
+			original: string;
+			userEdited?: string;
+			toolEdited?: string;
+		};
+		language: string;
+	}
 
+	export class ChatToolInvocationPart {
+		toolName: string;
+		toolCallId: string;
+		isError?: boolean;
+		invocationMessage?: string | MarkdownString;
+		originMessage?: string | MarkdownString;
+		pastTenseMessage?: string | MarkdownString;
+		isConfirmed?: boolean;
+		isComplete?: boolean;
+		toolSpecificData?: ChatTerminalToolInvocationData;
+		fromSubAgent?: boolean;
+		presentation?: 'hidden' | 'hiddenAfterComplete' | undefined;
+
+		constructor(toolName: string, toolCallId: string, isError?: boolean);
+	}
+
+	/**
+	 * Represents a single file diff entry in a multi diff view.
+	 */
+	export interface ChatResponseDiffEntry {
+		/**
+		 * The original file URI (undefined for new files).
+		 */
+		originalUri?: Uri;
+
+		/**
+		 * The modified file URI (undefined for deleted files).
+		 */
+		modifiedUri?: Uri;
+
+		/**
+		 * Optional URI to navigate to when clicking on the file.
+		 */
+		goToFileUri?: Uri;
+
+		/**
+		 * Added data (e.g. line numbers) to show in the UI
+		 */
+		added?: number;
+
+		/**
+		 * Removed data (e.g. line numbers) to show in the UI
+		 */
+		removed?: number;
+	}
+
+	/**
+	 * Represents a part of a chat response that shows multiple file diffs.
+	 */
+	export class ChatResponseMultiDiffPart {
+		/**
+		 * Array of file diff entries to display.
+		 */
+		value: ChatResponseDiffEntry[];
+
+		/**
+		 * The title for the multi diff editor.
+		 */
+		title: string;
+
+		/**
+		 * Whether the multi diff editor should be read-only.
+		 * When true, users cannot open individual files or interact with file navigation.
+		 */
+		readOnly?: boolean;
+
+		/**
+		 * Create a new ChatResponseMultiDiffPart.
+		 * @param value Array of file diff entries.
+		 * @param title The title for the multi diff editor.
+		 * @param readOnly Optional flag to make the multi diff editor read-only.
+		 */
+		constructor(value: ChatResponseDiffEntry[], title: string, readOnly?: boolean);
+	}
+
+	export class ChatResponseExternalEditPart {
+		uris: Uri[];
+		callback: () => Thenable<unknown>;
+		applied: Thenable<string>;
+		constructor(uris: Uri[], callback: () => Thenable<unknown>);
+	}
+
+	export type ExtendedChatResponsePart = ChatResponsePart | ChatResponseTextEditPart | ChatResponseNotebookEditPart | ChatResponseConfirmationPart | ChatResponseCodeCitationPart | ChatResponseReferencePart2 | ChatResponseMovePart | ChatResponseExtensionsPart | ChatResponsePullRequestPart | ChatPrepareToolInvocationPart | ChatToolInvocationPart | ChatResponseMultiDiffPart | ChatResponseThinkingProgressPart | ChatResponseExternalEditPart;
 	export class ChatResponseWarningPart {
 		value: MarkdownString;
 		constructor(value: string | MarkdownString);
@@ -98,20 +189,22 @@ declare module 'vscode' {
 	}
 
 	/**
- * A specialized progress part for displaying thinking/reasoning steps.
- */
-	export class ChatResponseThinkingProgressPart extends ChatResponseProgressPart {
-		value: string;
+	 * A specialized progress part for displaying thinking/reasoning steps.
+	 */
+	export class ChatResponseThinkingProgressPart {
+		value: string | string[];
 		id?: string;
-		metadata?: string;
+		metadata?: { readonly [key: string]: any };
+		task?: (progress: Progress<LanguageModelThinkingPart>) => Thenable<string | void>;
 
 		/**
 		 * Creates a new thinking progress part.
 		 * @param value An initial progress message
 		 * @param task A task that will emit thinking parts during its execution
 		 */
-		constructor(value: string, id?: string, metadata?: string)
+		constructor(value: string | string[], id?: string, metadata?: { readonly [key: string]: any }, task?: (progress: Progress<LanguageModelThinkingPart>) => Thenable<string | void>);
 	}
+
 	export class ChatResponseReferencePart2 {
 		/**
 		 * The reference target.
@@ -195,7 +288,6 @@ declare module 'vscode' {
 		constructor(uri: Uri, title: string, description: string, author: string, linkTag: string);
 	}
 
-
 	export interface ChatResponseStream {
 
 		/**
@@ -217,6 +309,14 @@ declare module 'vscode' {
 		notebookEdit(target: Uri, edits: NotebookEdit | NotebookEdit[]): void;
 
 		notebookEdit(target: Uri, isDone: true): void;
+
+		/**
+		 * Makes an external edit to one or more resources. Changes to the
+		 * resources made within the `callback` and before it resolves will be
+		 * tracked as agent edits. This can be used to track edits made from
+		 * external tools that don't generate simple {@link textEdit textEdits}.
+		 */
+		externalEdit(target: Uri | Uri[], callback: () => Thenable<void>): Thenable<string>;
 
 		markdownWithVulnerabilities(value: string | MarkdownString, vulnerabilities: ChatVulnerability[]): void;
 		codeblockUri(uri: Uri, isEdit?: boolean): void;
@@ -262,26 +362,26 @@ declare module 'vscode' {
 		Omitted = 3
 	}
 
+	export type ThinkingDelta = {
+		text?: string | string[];
+		id: string;
+		metadata?: { readonly [key: string]: any };
+	} | {
+		text?: string | string[];
+		id?: string;
+		metadata: { readonly [key: string]: any };
+	} |
+	{
+		text: string | string[];
+		id?: string;
+		metadata?: { readonly [key: string]: any };
+	};
+
 	export enum ChatResponseClearToPreviousToolInvocationReason {
 		NoReason = 0,
 		FilteredContentRetry = 1,
 		CopyrightContentRetry = 2,
 	}
-
-	export type ThinkingDelta = {
-		text?: string;
-		id: string;
-		metadata?: string;
-	} | {
-		text?: string;
-		id?: string;
-		metadata: string;
-	} |
-	{
-		text: string;
-		id?: string;
-		metadata?: string;
-	};
 
 	/**
 	 * Does this piggy-back on the existing ChatRequest, or is it a different type of request entirely?
@@ -325,7 +425,7 @@ declare module 'vscode' {
 		 */
 		readonly label: string;
 
-		constructor(id: string, label: string);
+		private constructor(id: string, label: string);
 	}
 
 	export class LanguageModelToolMCPSource {
@@ -344,7 +444,7 @@ declare module 'vscode' {
 		 */
 		readonly instructions?: string;
 
-		constructor(label: string, name: string, instructions?: string);
+		private constructor(label: string, name: string, instructions?: string);
 	}
 
 	export interface LanguageModelToolInformation {
@@ -366,7 +466,7 @@ declare module 'vscode' {
 		 * Event that fires when a request is paused or unpaused.
 		 * Chat requests are initially unpaused in the {@link requestHandler}.
 		 */
-		onDidChangePauseState: Event<ChatParticipantPauseStateEvent>;
+		readonly onDidChangePauseState: Event<ChatParticipantPauseStateEvent>;
 	}
 
 	export interface ChatParticipantPauseStateEvent {
@@ -400,6 +500,9 @@ declare module 'vscode' {
 			participant?: string;
 			command?: string;
 		};
+		/**
+		 * An optional detail string that will be rendered at the end of the response in certain UI contexts.
+		 */
 		details?: string;
 	}
 
@@ -499,11 +602,11 @@ declare module 'vscode' {
 		// eslint-disable-next-line local/vscode-dts-string-type-literals
 		kind: 'chatEditingHunkAction';
 		uri: Uri;
-		hasRemainingEdits: boolean;
-		outcome: ChatEditingHunkActionOutcome;
 		lineCount: number;
 		linesAdded: number;
 		linesRemoved: number;
+		outcome: ChatEditingSessionActionOutcome;
+		hasRemainingEdits: boolean;
 	}
 
 	export enum ChatEditingSessionActionOutcome {
@@ -522,6 +625,11 @@ declare module 'vscode' {
 		 * TODO Needed for now to drive the variableName-type reference, but probably both of these should go away in the future.
 		 */
 		readonly name: string;
+
+		/**
+		 * The list of tools were referenced in the value of the reference
+		 */
+		readonly toolReferences?: readonly ChatLanguageModelToolReference[];
 	}
 
 	export interface ChatResultFeedback {
@@ -563,6 +671,14 @@ declare module 'vscode' {
 	}
 
 	export interface ChatRequest {
-		modeInstructions?: string;
+		readonly modeInstructions?: string;
+		readonly modeInstructions2?: ChatRequestModeInstructions;
+	}
+
+	export interface ChatRequestModeInstructions {
+		readonly name: string;
+		readonly content: string;
+		readonly toolReferences?: readonly ChatLanguageModelToolReference[];
+		readonly metadata?: Record<string, boolean | string | number>;
 	}
 }

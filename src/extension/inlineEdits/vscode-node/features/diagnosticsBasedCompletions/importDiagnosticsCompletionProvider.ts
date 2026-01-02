@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { isPreRelease } from '../../../../../platform/env/common/packagejson';
 import { IFileSystemService } from '../../../../../platform/filesystem/common/fileSystemService';
 import { CodeActionData } from '../../../../../platform/inlineEdits/common/dataTypes/codeActionData';
 import { DocumentId } from '../../../../../platform/inlineEdits/common/dataTypes/documentId';
@@ -205,8 +206,11 @@ export class ImportDiagnosticCompletionProvider implements IDiagnosticCompletion
 			['typescriptreact', javascriptImportHandler],
 			['javascriptreact', javascriptImportHandler],
 			['python', pythonImportHandler],
-			['java', javaImportHandler],
 		]);
+
+		if (isPreRelease) {
+			this._importHandlers.set('java', javaImportHandler);
+		}
 	}
 
 	public providesCompletionsForDiagnostic(workspaceDocument: IVSCodeObservableDocument, diagnostic: Diagnostic, language: LanguageId, pos: Position): boolean {
@@ -409,7 +413,7 @@ class JavascriptImportHandler implements ILanguageImportHandler {
 		const pathAsInTitle = codeAction.title.substring(importTitlePrefix.length).trim();
 		let importPath = pathAsInTitle;
 		if ((importPath.startsWith('"') && importPath.endsWith('"')) ||
-			(importPath.startsWith("'") && importPath.endsWith("'")) ||
+			(importPath.startsWith(`'`) && importPath.endsWith(`'`)) ||
 			(importPath.startsWith('`') && importPath.endsWith('`'))) {
 			importPath = importPath.slice(1, -1);
 		}

@@ -6,9 +6,10 @@ import assert from 'assert';
 
 import { type LanguageService } from 'typescript';
 
-import { computeContext as _computeContext } from '../../common/api';
-import { ContextResult, RequestContext, SingleLanguageServiceSession, TokenBudget, type ComputeContextSession } from '../../common/contextProvider';
-import { CodeSnippet, ContextKind, type ContextItem, type FullContextItem, type PriorityTag, type Trait } from '../../common/protocol';
+import { computeContext as _computeContext, prepareNesRename as _prepareNesRename } from '../../common/api';
+import { CharacterBudget, ContextResult, RequestContext, SingleLanguageServiceSession, type ComputeContextSession } from '../../common/contextProvider';
+import { PrepareNesRenameResult } from '../../common/nesRenameValidator';
+import { CodeSnippet, ContextKind, type ContextItem, type FullContextItem, type PriorityTag, type RenameKind, type Trait } from '../../common/protocol';
 import { NullCancellationToken } from '../../common/typescripts';
 import { NodeHost } from '../host';
 import { LanguageServices } from './languageServices';
@@ -112,7 +113,7 @@ export type TestSession = {
 export type ContextItemWithPriority = FullContextItem & PriorityTag;
 
 export function computeContext(session: TestSession, document: string, position: { line: number; character: number }, contextKind: ContextKind): ContextItemWithPriority[] {
-	const result: ContextResult = new ContextResult(new TokenBudget(7 * 1024), new RequestContext(session.session, [], new Map()));
+	const result: ContextResult = new ContextResult(new CharacterBudget(7 * 1024 * 4), new CharacterBudget(8 * 1024 * 4), new RequestContext(session.session, [], new Map(), true));
 	const program = session.service.getProgram();
 	if (program === undefined) {
 		return [];
@@ -124,6 +125,21 @@ export function computeContext(session: TestSession, document: string, position:
 	const pos = sourceFile.getPositionOfLineAndCharacter(position.line, position.character);
 	_computeContext(result, session.session, session.service, document, pos, new NullCancellationToken());
 	return result.items().filter((item) => item.kind === contextKind);
+}
+
+export function prepareNesRename(session: TestSession, document: string, position: { line: number; character: number }, oldName: string, newName: string): RenameKind | undefined {
+	const program = session.service.getProgram();
+	if (program === undefined) {
+		return;
+	}
+	const sourceFile = program.getSourceFile(document);
+	if (sourceFile === undefined) {
+		return;
+	}
+	const result = new PrepareNesRenameResult();
+	const pos = sourceFile.getPositionOfLineAndCharacter(position.line, position.character);
+	_prepareNesRename(result, session.service, document, pos, oldName, newName, new NullCancellationToken());
+	return result.getCanRename();
 }
 
 class LanguageServiceTestSession extends SingleLanguageServiceSession {

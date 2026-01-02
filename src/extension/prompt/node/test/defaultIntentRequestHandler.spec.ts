@@ -16,13 +16,16 @@ import { IChatEndpoint } from '../../../../platform/networking/common/networking
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry';
 import { SpyingTelemetryService } from '../../../../platform/telemetry/node/spyingTelemetryService';
 import { ITestingServicesAccessor } from '../../../../platform/test/node/services';
+import { NullWorkspaceFileIndex } from '../../../../platform/workspaceChunkSearch/node/nullWorkspaceFileIndex';
+import { IWorkspaceFileIndex } from '../../../../platform/workspaceChunkSearch/node/workspaceFileIndex';
 import { ChatResponseStreamImpl } from '../../../../util/common/chatResponseStreamImpl';
 import { CancellationToken } from '../../../../util/vs/base/common/cancellation';
 import { Event } from '../../../../util/vs/base/common/event';
 import { isObject, isUndefinedOrNull } from '../../../../util/vs/base/common/types';
 import { generateUuid } from '../../../../util/vs/base/common/uuid';
+import { SyncDescriptor } from '../../../../util/vs/platform/instantiation/common/descriptors';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
-import { ChatLocation, ChatResponseConfirmationPart, LanguageModelTextPart, LanguageModelToolResult } from '../../../../vscodeTypes';
+import { ChatLocation, ChatResponseConfirmationPart, ChatResponseMarkdownPart, LanguageModelTextPart, LanguageModelToolResult } from '../../../../vscodeTypes';
 import { ToolCallingLoop } from '../../../intents/node/toolCallingLoop';
 import { ToolResultMetadata } from '../../../prompts/node/panel/toolCalling';
 import { createExtensionUnitTestingServices } from '../../../test/node/services';
@@ -52,8 +55,10 @@ suite('defaultIntentRequestHandler', () => {
 		chatResponse = [];
 		services.define(ITelemetryService, telemetry);
 		services.define(IChatMLFetcher, new StaticChatMLFetcher(chatResponse));
+		services.define(IWorkspaceFileIndex, new SyncDescriptor(NullWorkspaceFileIndex));
+
 		accessor = services.createTestingAccessor();
-		endpoint = accessor.get(IInstantiationService).createInstance(MockEndpoint);
+		endpoint = accessor.get(IInstantiationService).createInstance(MockEndpoint, undefined);
 		builtPrompts = [];
 		response = [];
 		promptResult = nullRenderPromptResult();
@@ -124,9 +129,10 @@ suite('defaultIntentRequestHandler', () => {
 		command: string | undefined;
 		references: readonly ChatPromptReference[] = [];
 		toolReferences: readonly ChatLanguageModelToolReference[] = [];
-		model: LanguageModelChat = null as any;
+		model: LanguageModelChat = { family: '' } as any;
 		tools = new Map();
 		id = generateUuid();
+		sessionId = generateUuid();
 	}
 
 	const responseStream = new ChatResponseStreamImpl(p => response.push(p), () => { });
@@ -323,23 +329,14 @@ suite('defaultIntentRequestHandler', () => {
 		expect(last).toBeInstanceOf(ChatResponseConfirmationPart);
 
 		const request = new TestChatRequest();
-		request.acceptedConfirmationData = [(last as ChatResponseConfirmationPart).data];
+		request.rejectedConfirmationData = [(last as ChatResponseConfirmationPart).data];
 		request.prompt = (last as ChatResponseConfirmationPart).buttons![1];
 		const handler2 = makeHandler({ request });
 		await handler2.getResult();
 
-		expect(response.at(-1)).toMatchInlineSnapshot(`
-			ChatResponseMarkdownPart {
-			  "value": MarkdownString {
-			    "delegate": MarkdownString {
-			      "isTrusted": undefined,
-			      "supportHtml": false,
-			      "supportThemeIcons": false,
-			      "value": "Let me know if there's anything else I can help with!",
-			    },
-			  },
-			}
-		`);
+		const last2 = response.at(-1);
+		expect(last2).toBeInstanceOf(ChatResponseMarkdownPart);
+		expect((last2 as ChatResponseMarkdownPart).value.value).toMatchInlineSnapshot(`"Let me know if there's anything else I can help with!"`);
 	});
 });
 
